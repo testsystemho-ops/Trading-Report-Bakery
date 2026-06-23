@@ -26,9 +26,15 @@ async function loadData() {
         if (!isNaN(na) && !isNaN(nb)) return na - nb;
         return a.localeCompare(b);
       });
+    console.log('[loadData] items:', ITEMS_DATA.length, 'stores:', STORES.length);
   } catch (e) {
     console.error('loadData failed:', e);
-    alert('โหลด data.json ไม่สำเร็จ: ' + e.message);
+    // Show visible error on login card
+    const errEl = document.getElementById('loginErr');
+    if(errEl) {
+      errEl.textContent = '⚠️ โหลดข้อมูลไม่สำเร็จ กรุณา Refresh หน้านี้ (' + e.message + ')';
+      errEl.style.display = 'block';
+    }
   }
 }
 
@@ -97,6 +103,11 @@ function initLogin(){
 function startApp(){
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
+  // Set logo images
+  if(typeof LOGO_URI !== 'undefined') {
+    document.getElementById('loginLogo').src = LOGO_URI;
+    document.getElementById('sbLogo').src = LOGO_URI;
+  }
   const isAdmin=SES.role==='admin';
   document.getElementById('sbName').textContent=isAdmin?SES.name:`สาขา ${SES.no} — ${SES.name}`;
   document.getElementById('sbRole').textContent=isAdmin?'ผู้ดูแลระบบ (Admin)':'บัญชีสาขา (Store)';
@@ -964,6 +975,11 @@ async function doClear(){if(document.getElementById('cInp').value.trim()!=='DELE
 document.addEventListener('DOMContentLoaded', async () => {
   // Load data.json first, then boot the app
   await loadData();
+  // Set login screen logo
+  if(typeof LOGO_URI !== 'undefined') {
+    document.getElementById('loginLogo').src = LOGO_URI;
+    document.getElementById('sbLogo').src = LOGO_URI;
+  }
   initLogin();
   document.getElementById('menuBtn').addEventListener('click', () => {
     document.getElementById('sidebar').classList.add('open');
