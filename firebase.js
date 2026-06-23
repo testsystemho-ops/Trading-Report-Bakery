@@ -27,18 +27,6 @@ try {
 }
 
 /* ════ LOGO INIT ════ */
-// Set logo images immediately when DOM is ready
-// firebase.js loads with defer, so DOM is already ready
-(function() {
-  function setLogos() {
-    var loginLogo = document.getElementById('loginLogo');
-    var sbLogo    = document.getElementById('sbLogo');
-    if (loginLogo) loginLogo.src = LOGO_URI;
-    if (sbLogo)    sbLogo.src    = LOGO_URI;
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setLogos);
-  } else {
-    setLogos();
-  }
-})();
+// Direct assignment - scripts run after DOM is parsed (bottom of body)
+document.getElementById('loginLogo').src = LOGO_URI;
+document.getElementById('sbLogo').src = LOGO_URI;
