@@ -25,3 +25,20 @@ try {
 } catch(e) {
   console.warn('Firebase init error:', e.message);
 }
+
+/* ════ LOGO INIT ════ */
+// Set logo images immediately when DOM is ready
+// firebase.js loads with defer, so DOM is already ready
+(function() {
+  function setLogos() {
+    var loginLogo = document.getElementById('loginLogo');
+    var sbLogo    = document.getElementById('sbLogo');
+    if (loginLogo) loginLogo.src = LOGO_URI;
+    if (sbLogo)    sbLogo.src    = LOGO_URI;
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setLogos);
+  } else {
+    setLogos();
+  }
+})();
