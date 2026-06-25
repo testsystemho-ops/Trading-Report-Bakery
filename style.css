@@ -505,3 +505,35 @@ mark.hl { background:#FFF3CD; border-radius:3px; padding:0 2px; }
   .login-card { padding:28px 22px; }
   .content { padding:14px; }
 }
+
+/* ═══ MONTH LOCK BANNER ═══ */
+.month-lock-banner {
+  display:flex; align-items:center; gap:16px;
+  background: linear-gradient(135deg, #FEF0F2, #FFF5F6);
+  border: 1.5px solid rgba(224,50,68,.25);
+  border-radius: var(--r16);
+  padding: 18px 22px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 12px rgba(224,50,68,.10);
+  animation: lockPulse 3s ease-in-out infinite;
+}
+@keyframes lockPulse {
+  0%,100% { box-shadow: 0 2px 12px rgba(224,50,68,.10); }
+  50%      { box-shadow: 0 4px 20px rgba(224,50,68,.20); }
+}
+.lock-icon {
+  font-size: 40px; flex-shrink:0;
+  filter: drop-shadow(0 2px 6px rgba(224,50,68,.30));
+}
+.lock-text { flex:1; }
+.lock-title {
+  font-size: 15px; font-weight: 800; color: var(--red);
+  margin-bottom: 4px;
+}
+.lock-sub {
+  font-size: 13px; color: var(--txt2); line-height: 1.5;
+}
+
+/* ═══ MONTH CONTROL TABLE HIGHLIGHT ═══ */
+.mc-active-row { background: var(--green-bg) !important; }
+.mc-inactive-row { background: var(--surface2); }
