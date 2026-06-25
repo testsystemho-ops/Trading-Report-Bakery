@@ -142,16 +142,19 @@ async function setMonthActive(ym, active){
   await dbSet(`monthControl/${ym}`, { active, updatedBy:'admin', updatedAt: Date.now() });
 }
 
-/* สร้างรายการ 12 เดือนย้อนหลัง + 3 เดือนล่วงหน้า */
+/* สร้างรายการเดือน ตั้งแต่เดือนปัจจุบัน → ธ.ค. 2030 (เรียงจากน้อยไปมาก) */
 function generateMonthList(){
   const list=[];
   const now=new Date();
-  for(let i=12; i>=-3; i--){
-    const d=new Date(now.getFullYear(), now.getMonth()-i, 1);
-    const ym=`${d.getFullYear()}-${p2(d.getMonth()+1)}`;
-    list.push(ym);
+  const startY=now.getFullYear(), startM=now.getMonth(); // 0-indexed
+  const endY=2030, endM=11; // ธ.ค. 2030
+  let y=startY, m=startM;
+  while(y<endY||(y===endY&&m<=endM)){
+    list.push(`${y}-${p2(m+1)}`);
+    m++;
+    if(m>11){m=0;y++;}
   }
-  return list;
+  return list; // ascending: ปัจจุบัน → ธ.ค. 2030
 }
 
 /* ════════════════════════════════════════════
@@ -170,31 +173,21 @@ async function renderStoreDashboard(C){
   setTB('แดชบอร์ด',`สาขา ${SES.no} — ${SES.name}`);
   C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
 
-  const allD = await dbGet(`entries/${SES.no}`) || {};
-  const monthList = generateMonthList().reverse(); // เรียงใหม่สุดก่อน
-
-  // คำนวณสถิติแต่ละเดือน
-  const monthStats = monthList.map(ym => {
-    const mData = allD[ym] || {};
-    const filledCount = Object.keys(mData).filter(k => mData[k] !== null && mData[k] !== undefined && mData[k] !== '').length;
-    const totalQty = Object.values(mData).reduce((s,v) => s + (parseFloat(v)||0), 0);
-    return { ym, filledCount, totalQty, hasData: filledCount > 0 };
-  });
-
-  // เดือนปัจจุบัน
   const curYM = currentYM();
-  const curStat = monthStats.find(m => m.ym === curYM) || { filledCount:0, totalQty:0 };
-  const total = ITEMS_DATA.length;
-
-  // check month active status
   const mc = await getMonthControl();
   const curActive = mc[curYM] && mc[curYM].active === true;
+  const total = ITEMS_DATA.length;
 
-  // สร้างกราฟ SVG bar chart (12 เดือนล่าสุด)
-  const chartMonths = monthStats.slice(0, 12).reverse();
-  const maxQty = Math.max(...chartMonths.map(m => m.totalQty), 1);
-  const maxItems = Math.max(...chartMonths.map(m => m.filledCount), 1);
-  const barChart = buildBarChart(chartMonths, maxQty, maxItems, curYM);
+  // โหลดข้อมูลเดือนปัจจุบัน
+  const curData = await dbGet(`entries/${SES.no}/${curYM}`) || {};
+  const filledCount = Object.keys(curData).filter(k => curData[k] !== null && curData[k] !== undefined && curData[k] !== '').length;
+  const totalQty = Object.values(curData).reduce((s,v) => s + (parseFloat(v)||0), 0);
+  const pct = total>0 ? Math.round(filledCount/total*100) : 0;
+
+  // นับเดือนที่เคยบันทึก
+  const allD = await dbGet(`entries/${SES.no}`) || {};
+  const savedMonths = Object.keys(allD).filter(k=>/^\d{4}-\d{2}$/.test(k));
+  const totalMonths = savedMonths.length;
 
   const lockBanner = !curActive ? `
     <div class="month-lock-banner">
@@ -212,7 +205,7 @@ async function renderStoreDashboard(C){
       <div class="hero-icon">🥐</div>
       <div class="hero-content">
         <div class="hero-lbl">รายการที่บันทึกแล้วเดือนนี้</div>
-        <div class="hero-val num">${fNum(curStat.filledCount)}<span style="font-size:22px;opacity:.65"> / ${fNum(total)}</span></div>
+        <div class="hero-val num">${fNum(filledCount)}<span style="font-size:22px;opacity:.65"> / ${fNum(total)}</span></div>
         <div class="hero-hint">${ymToFull(curYM)} · BAKERY GRP.68,78 · ${curActive?'<span style="color:#7DFFD0">✅ เปิดบันทึก</span>':'<span style="color:#FFCDD2">🔒 ยังไม่เปิด</span>'}</div>
       </div>
       <div class="hero-badge">BAKERY</div>
@@ -221,12 +214,12 @@ async function renderStoreDashboard(C){
     <div class="kpi-grid" style="margin-bottom:16px">
       <div class="kpi-card amber">
         <div class="kpi-lbl">✅ กรอกแล้วเดือนนี้</div>
-        <div class="kpi-val">${fNum(curStat.filledCount)}</div>
+        <div class="kpi-val">${fNum(filledCount)}</div>
         <div class="kpi-hint">/ ${fNum(total)} รายการ</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-lbl">📦 QTY รวมเดือนนี้</div>
-        <div class="kpi-val">${fNum(curStat.totalQty,2)}</div>
+        <div class="kpi-val">${fNum(totalQty,2)}</div>
         <div class="kpi-hint">รวมทุกรายการ</div>
       </div>
       <div class="kpi-card ${curActive?'green':'red'}">
@@ -235,111 +228,24 @@ async function renderStoreDashboard(C){
         <div class="kpi-hint">${curActive?'เปิดบันทึกแล้ว':'ยังไม่เปิด'}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-lbl">🏪 สาขา</div>
-        <div class="kpi-val" style="font-size:20px">${SES.no}</div>
-        <div class="kpi-hint">${esc(SES.name)}</div>
+        <div class="kpi-lbl">🗂️ เดือนที่บันทึกแล้ว</div>
+        <div class="kpi-val">${totalMonths}</div>
+        <div class="kpi-hint">เดือน (ทั้งหมด)</div>
       </div>
     </div>
 
     <div class="prog-card" style="margin-bottom:16px">
       <div class="prog-head">
         <div><div class="prog-title">ความครบถ้วนเดือนนี้</div><div class="prog-sub">สาขา ${SES.no} — ${esc(SES.name)}</div></div>
-        <div class="prog-pct">${total>0?Math.round(curStat.filledCount/total*100):0}%</div>
+        <div class="prog-pct">${pct}%</div>
       </div>
-      <div class="prog-track"><div class="prog-fill" style="width:${total>0?Math.min(100,Math.round(curStat.filledCount/total*100)):0}%"></div></div>
+      <div class="prog-track"><div class="prog-fill" style="width:${Math.min(100,pct)}%"></div></div>
       <div class="prog-labels"><span>0 รายการ</span><span>${fNum(total)} รายการ</span></div>
-    </div>
-
-    <!-- กราฟรายเดือน -->
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-head">
-        <div class="card-title">📊 สถิติรายเดือน <span class="sub">12 เดือนล่าสุด</span></div>
-      </div>
-      ${barChart}
     </div>
 
     <button class="btn btn-primary" onclick="go('entry')" ${!curActive?'disabled title="Admin ยังไม่เปิดเดือนนี้"':''} style="${!curActive?'opacity:.55;cursor:not-allowed':''}">
       📝 ${curActive?'เริ่มบันทึกการตรวจนับ':'รอ Admin เปิดเดือนก่อนบันทึก'}
     </button>`;
-}
-
-/* ════ BAR CHART SVG ════ */
-function buildBarChart(months, maxQty, maxItems, curYM){
-  if(!months.length) return '<p style="color:var(--txt3);text-align:center;padding:20px">ยังไม่มีข้อมูล</p>';
-  const W=600, H=220, PAD_L=40, PAD_B=50, PAD_T=20, PAD_R=10;
-  const chartW=W-PAD_L-PAD_R, chartH=H-PAD_B-PAD_T;
-  const n=months.length;
-  const bGroup=chartW/n;
-  const bW=Math.min(bGroup*0.38,24);
-  const gap=bGroup*0.06;
-
-  let bars='', labels='', legend='';
-  months.forEach((m,i)=>{
-    const x=PAD_L+i*bGroup+bGroup/2;
-    const hItems=maxItems>0?Math.round((m.filledCount/maxItems)*chartH):0;
-    const hQty=maxQty>0?Math.round((m.totalQty/maxQty)*chartH):0;
-    const isCur=m.ym===curYM;
-
-    // bar items (blue)
-    const bx1=x-bW-gap/2;
-    const by1=PAD_T+chartH-hItems;
-    bars+=`<rect x="${bx1}" y="${by1}" width="${bW}" height="${hItems}" rx="3"
-      fill="${isCur?'#0B5FB4':'#3B83D4'}" opacity="${isCur?1:0.75}">
-      <title>${ymToThai(m.ym)}: ${fNum(m.filledCount)} รายการ</title></rect>`;
-
-    // bar qty (amber)
-    const bx2=x+gap/2;
-    const by2=PAD_T+chartH-hQty;
-    bars+=`<rect x="${bx2}" y="${by2}" width="${bW}" height="${hQty}" rx="3"
-      fill="${isCur?'#E07B2A':'#F09550'}" opacity="${isCur?1:0.75}">
-      <title>${ymToThai(m.ym)}: QTY ${fNum(m.totalQty,0)}</title></rect>`;
-
-    // label
-    const labelY=PAD_T+chartH+16;
-    labels+=`<text x="${x}" y="${labelY}" text-anchor="middle" font-size="9.5" fill="${isCur?'#0B5FB4':'#6B7A90'}" font-weight="${isCur?'700':'400'}">${ymToThai(m.ym)}</text>`;
-
-    // value on top of bar (only if has data & not too small)
-    if(m.filledCount>0&&hItems>18){
-      bars+=`<text x="${bx1+bW/2}" y="${by1-4}" text-anchor="middle" font-size="9" fill="#0B5FB4" font-weight="700">${fNum(m.filledCount)}</text>`;
-    }
-  });
-
-  // Y axis gridlines
-  let grid='';
-  for(let g=0;g<=4;g++){
-    const gy=PAD_T+chartH*(1-g/4);
-    grid+=`<line x1="${PAD_L}" y1="${gy}" x2="${W-PAD_R}" y2="${gy}" stroke="#DDE3EC" stroke-width="1"/>`;
-    if(g>0){
-      const val=Math.round(maxItems*g/4);
-      grid+=`<text x="${PAD_L-4}" y="${gy+4}" text-anchor="end" font-size="9" fill="#9AABBE">${fNum(val)}</text>`;
-    }
-  }
-
-  legend=`
-    <div style="display:flex;gap:18px;margin-top:10px;justify-content:center;font-size:12px;color:var(--txt3)">
-      <span style="display:flex;align-items:center;gap:6px"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#0B5FB4"></span>จำนวนรายการ (SKU)</span>
-      <span style="display:flex;align-items:center;gap:6px"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#E07B2A"></span>QTY รวม (สัดส่วน)</span>
-      <span style="display:flex;align-items:center;gap:6px"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#0B5FB4;opacity:.4"></span>เดือนปัจจุบัน = สีเข้ม</span>
-    </div>`;
-
-  return `
-    <div style="overflow-x:auto">
-      <svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:360px;max-width:100%;display:block">
-        <defs>
-          <linearGradient id="bgGrid" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#F7F9FC"/>
-            <stop offset="100%" stop-color="#FFFFFF"/>
-          </linearGradient>
-        </defs>
-        <rect x="${PAD_L}" y="${PAD_T}" width="${chartW}" height="${chartH}" fill="url(#bgGrid)" rx="4"/>
-        ${grid}
-        ${bars}
-        ${labels}
-        <line x1="${PAD_L}" y1="${PAD_T}" x2="${PAD_L}" y2="${PAD_T+chartH}" stroke="#DDE3EC" stroke-width="1"/>
-        <line x1="${PAD_L}" y1="${PAD_T+chartH}" x2="${W-PAD_R}" y2="${PAD_T+chartH}" stroke="#DDE3EC" stroke-width="1"/>
-      </svg>
-    </div>
-    ${legend}`;
 }
 
 /* ════════════════════════════════════════════
@@ -350,31 +256,17 @@ async function renderMonthControl(){
   const C=document.getElementById('content');
   C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
   const mc = await getMonthControl();
-  const months = generateMonthList();
   const curYM = currentYM();
+  const months = generateMonthList(); // ปัจจุบัน → ธ.ค. 2030
 
-  const rows = months.map(ym => {
-    const isActive = mc[ym] && mc[ym].active === true;
-    const isCur = ym === curYM;
-    return `
-      <tr ${isCur?'style="background:var(--blue-xxl)"':''}>
-        <td>
-          <span class="num" style="font-weight:${isCur?'800':'500'};color:${isCur?'var(--blue)':'var(--txt)'}">${ym}</span>
-          ${isCur?'<span class="pill pill-info" style="margin-left:6px;font-size:10px">เดือนปัจจุบัน</span>':''}
-        </td>
-        <td><b style="color:var(--txt2)">${ymToFull(ym)}</b></td>
-        <td>
-          <span class="pill ${isActive?'pill-ok':'pill-no'}">
-            ${isActive?'✅ Active (เปิดบันทึก)':'🔒 Inactive (ปิดบันทึก)'}
-          </span>
-        </td>
-        <td class="tr">
-          ${isActive
-            ? `<button class="btn btn-sm" style="background:var(--red-bg);color:var(--red);border-color:rgba(224,50,68,.2)" onclick="toggleMonth('${ym}',false)">🔒 ปิด (Inactive)</button>`
-            : `<button class="btn btn-blue btn-sm" onclick="toggleMonth('${ym}',true)">✅ เปิด (Active)</button>`
-          }
-        </td>
-      </tr>`;
+  // นับ Active ทั้งหมด
+  const activeCount = months.filter(ym=>mc[ym]&&mc[ym].active===true).length;
+
+  // Dropdown options
+  const ymOpts = months.map(ym=>{
+    const isActive = mc[ym]&&mc[ym].active===true;
+    const isCur = ym===curYM;
+    return `<option value="${ym}">${ym} — ${ymToFull(ym)}${isCur?' ⭐':''} ${isActive?'✅':'🔒'}</option>`;
   }).join('');
 
   C.innerHTML=`
@@ -384,33 +276,88 @@ async function renderMonthControl(){
         <div>
           <div style="font-size:15px;font-weight:800;color:var(--txt)">Month Control — จัดการเดือนที่เปิดรับบันทึก</div>
           <div style="font-size:13px;color:var(--txt3);margin-top:4px">
-            Admin สามารถกำหนดได้ว่าเดือนไหน <b style="color:var(--green)">Active</b> (User สาขาบันทึกได้) หรือ <b style="color:var(--red)">Inactive</b> (ปิด — สาขาดูได้แต่บันทึกไม่ได้)
+            กำหนดว่าเดือนไหน <b style="color:var(--green)">Active</b> (User สาขาบันทึกได้) หรือ <b style="color:var(--red)">Inactive</b> (ดูได้แต่บันทึกไม่ได้)
           </div>
+          <div style="font-size:12px;color:var(--txt4);margin-top:4px">เปิดอยู่ปัจจุบัน ${activeCount} เดือน · ช่วง ${ymToThai(curYM)} — ธ.ค. ${2030+543}</div>
         </div>
       </div>
     </div>
+
     <div class="card">
       <div class="card-head">
-        <div class="card-title">📋 รายการเดือน <span class="sub">15 เดือน (ย้อนหลัง 12 + ล่วงหน้า 3)</span></div>
+        <div class="card-title">🔧 เลือกเดือนที่ต้องการจัดการ</div>
         <button class="btn btn-blue btn-sm" onclick="renderMonthControl()">🔄 รีเฟรช</button>
       </div>
-      <div class="tbl-wrap">
-        <table class="dtbl">
-          <thead>
-            <tr>
-              <th>เดือน (YYYY-MM)</th>
-              <th>ชื่อเดือน</th>
-              <th>สถานะ</th>
-              <th class="tr">Action</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
+
+      <!-- Dropdown เลือกเดือน -->
+      <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+        <div style="flex:1;min-width:240px">
+          <label class="flabel">📅 เลือกเดือน (${ymToThai(curYM)} — ธ.ค. ${2030+543})</label>
+          <select class="ctrl w100" id="mcYMSel" style="font-size:13.5px">
+            ${ymOpts}
+          </select>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-blue" onclick="mcToggleSelected(true)">✅ เปิด Active</button>
+          <button class="btn btn-sm" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);padding:9px 16px;border-radius:var(--r8);font-weight:600;cursor:pointer" onclick="mcToggleSelected(false)">🔒 ปิด Inactive</button>
+        </div>
       </div>
+
+      <!-- สถานะเดือนที่เลือก (แสดงแบบ realtime) -->
+      <div id="mcStatusBox" style="padding:14px 18px;border-radius:var(--r12);background:var(--surface2);border:1px solid var(--border2)">
+        <div style="font-size:12px;color:var(--txt3)">← เลือกเดือนด้านบน แล้วกดเปิด หรือปิด</div>
+      </div>
+
       <div style="margin-top:14px;padding:12px 16px;background:var(--warn-bg);border-radius:var(--r12);border:1px solid rgba(212,139,10,.20);font-size:13px;color:var(--warn)">
-        ⚠️ <b>หมายเหตุ:</b> เมื่อปิดเดือน (Inactive) User สาขาจะยังคงดูข้อมูลและ Export ได้ตามปกติ แต่จะไม่สามารถบันทึกหรือแก้ไขข้อมูลในเดือนนั้นได้
+        ⚠️ <b>หมายเหตุ:</b> เมื่อปิดเดือน (Inactive) User สาขาจะยังดูข้อมูลและ Export ได้ตามปกติ แต่บันทึกหรือแก้ไขข้อมูลไม่ได้
+      </div>
+    </div>
+
+    <!-- รายการเดือนที่ Active ทั้งหมด -->
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><div class="card-title">✅ เดือนที่เปิด Active <span class="sub">${activeCount} เดือน</span></div></div>
+      <div id="activeMonthList">
+        ${buildActiveMonthList(months, mc)}
       </div>
     </div>`;
+
+  // ผูก event บน select เพื่อแสดงสถานะ realtime
+  document.getElementById('mcYMSel').addEventListener('change', function(){
+    const ym=this.value;
+    const isActive=mc[ym]&&mc[ym].active===true;
+    const isCur=ym===curYM;
+    document.getElementById('mcStatusBox').innerHTML=`
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-size:28px">${isActive?'✅':'🔒'}</span>
+        <div>
+          <div style="font-weight:800;font-size:14px;color:var(--txt)">${ymToFull(ym)} ${isCur?'<span style="font-size:11px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:2px 8px;margin-left:4px">เดือนปัจจุบัน</span>':''}</div>
+          <div style="font-size:13px;color:${isActive?'var(--green)':'var(--red)'};font-weight:700;margin-top:2px">${isActive?'Active — เปิดให้บันทึก':'Inactive — ปิดการบันทึก'}</div>
+        </div>
+      </div>`;
+  });
+  // trigger ครั้งแรก
+  document.getElementById('mcYMSel').dispatchEvent(new Event('change'));
+}
+
+function buildActiveMonthList(months, mc){
+  const actives=months.filter(ym=>mc[ym]&&mc[ym].active===true);
+  if(!actives.length) return '<div style="padding:16px;text-align:center;color:var(--txt3);font-size:13px">ยังไม่มีเดือนที่เปิด Active</div>';
+  const curYM=currentYM();
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0">
+    ${actives.map(ym=>`
+      <div style="display:inline-flex;align-items:center;gap:8px;background:var(--green-bg);border:1px solid rgba(13,159,110,.20);border-radius:var(--r8);padding:7px 13px">
+        <span style="font-size:12.5px;font-weight:700;color:var(--green)">${ymToFull(ym)}</span>
+        ${ym===curYM?'<span style="font-size:10px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:1px 7px">ปัจจุบัน</span>':''}
+        <button onclick="toggleMonth('${ym}',false)" style="background:none;border:none;cursor:pointer;color:var(--txt4);font-size:13px;padding:0;line-height:1" title="ปิดเดือนนี้">✕</button>
+      </div>`).join('')}
+  </div>`;
+}
+
+async function mcToggleSelected(active){
+  const sel=document.getElementById('mcYMSel');
+  if(!sel)return;
+  const ym=sel.value;
+  await toggleMonth(ym, active);
 }
 
 async function toggleMonth(ym, active){
@@ -436,7 +383,9 @@ async function doToggleMonth(ym, active){
   try{
     await setMonthActive(ym, active);
     toast(`${active?'✅ เปิด':'🔒 ปิด'} เดือน ${ymToFull(ym)} แล้ว`,'ok');
-    renderMonthControl();
+    // refresh view ที่กำลังแสดงอยู่
+    if(CURVIEW==='monthcontrol') renderMonthControl();
+    else if(CURVIEW==='dashboard') go('dashboard');
   }catch(e){
     toast('เกิดข้อผิดพลาด: '+e.message,'err');
   }
@@ -708,133 +657,95 @@ async function renderAdminDashboard(C){
   const curYM = currentYM();
   const curActive = mc[curYM] && mc[curYM].active === true;
   const allE = await dbGet('entries') || {};
-  const months = generateMonthList().reverse(); // newest first
 
-  // สร้างสถิติรายเดือน
-  const monthStats = months.slice(0,12).map(ym=>{
-    let totalStores=0, totalItems=0, totalQty=0;
-    Object.keys(allE).forEach(sNo=>{
-      const mData=allE[sNo][ym]||{};
-      const f=Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length;
-      if(f>0){
-        totalStores++;
-        totalItems+=f;
-        totalQty+=Object.values(mData).reduce((s,v)=>s+(parseFloat(v)||0),0);
-      }
-    });
-    return{ym,totalStores,totalItems,totalQty,active:mc[ym]&&mc[ym].active===true};
+  // คำนวณสถิติเดือนปัจจุบัน
+  const totalStoresAll = STORES.length;
+  let curStores=0, curItems=0, curQty=0;
+  Object.keys(allE).forEach(sNo=>{
+    const mData=(allE[sNo]||{})[curYM]||{};
+    const f=Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length;
+    if(f>0){ curStores++; curItems+=f; curQty+=Object.values(mData).reduce((s,v)=>s+(parseFloat(v)||0),0); }
   });
+  const sentPct=totalStoresAll>0?Math.round(curStores/totalStoresAll*100):0;
 
-  // เดือนปัจจุบัน
-  const curStat=monthStats.find(m=>m.ym===curYM)||{totalStores:0,totalItems:0,totalQty:0};
-  const totalStores=STORES.length;
-  const sentPct=totalStores>0?Math.round(curStat.totalStores/totalStores*100):0;
+  // Active months count
+  const months=generateMonthList();
+  const activeCount=months.filter(ym=>mc[ym]&&mc[ym].active===true).length;
 
-  // กราฟ admin
-  const adminChart = buildAdminBarChart(monthStats.slice(0,12).reverse(), curYM);
+  // สาขาที่ยังไม่บันทึกเดือนนี้
+  const notSentStores=STORES.filter(s=>{
+    const mData=(allE[String(s.n)]||{})[curYM]||{};
+    return Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length===0;
+  });
 
   C.innerHTML=`
-    <!-- Status เดือนปัจจุบัน -->
-    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
-      <div class="card" style="flex:1;min-width:220px;border-left:4px solid ${curActive?'var(--green)':'var(--red)'}">
-        <div style="display:flex;align-items:center;gap:12px">
-          <div style="font-size:32px">${curActive?'✅':'🔒'}</div>
-          <div>
-            <div style="font-size:13px;font-weight:800;color:var(--txt)">เดือนปัจจุบัน: ${ymToFull(curYM)}</div>
-            <div style="font-size:12px;color:${curActive?'var(--green)':'var(--red)'};font-weight:700;margin-top:3px">${curActive?'Active — สาขาบันทึกได้':'Inactive — สาขายังบันทึกไม่ได้'}</div>
-            <button class="btn btn-sm" style="margin-top:8px;${curActive?'background:var(--red-bg);color:var(--red);border-color:rgba(224,50,68,.2)':'background:var(--green-bg);color:var(--green);border-color:rgba(13,159,110,.2)'}" onclick="toggleMonth('${curYM}',${!curActive})">
-              ${curActive?'🔒 ปิดเดือนนี้':'✅ เปิดเดือนนี้'}
-            </button>
-          </div>
-        </div>
+    <div class="hero-card" style="margin-bottom:16px">
+      <div class="hero-blob"></div>
+      <div class="hero-icon">🏪</div>
+      <div class="hero-content">
+        <div class="hero-lbl">สาขาที่บันทึกแล้วเดือนนี้ — ${ymToFull(curYM)}</div>
+        <div class="hero-val num">${curStores}<span style="font-size:22px;opacity:.65"> / ${totalStoresAll}</span></div>
+        <div class="hero-hint">${sentPct}% · ${curActive?'<span style="color:#7DFFD0">✅ เปิดบันทึก</span>':'<span style="color:#FFCDD2">🔒 ยังไม่เปิด</span>'}</div>
       </div>
-      <div class="card" style="flex:1;min-width:220px">
-        <div style="font-size:11px;font-weight:700;color:var(--txt3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">สาขาที่บันทึกแล้วเดือนนี้</div>
-        <div style="font-size:36px;font-weight:900;font-family:var(--mono);color:var(--blue)">${curStat.totalStores}<span style="font-size:18px;color:var(--txt3)"> / ${totalStores}</span></div>
-        <div style="height:6px;border-radius:3px;background:var(--surface3);margin-top:8px;overflow:hidden">
-          <div style="height:100%;border-radius:3px;background:var(--blue);width:${sentPct}%;transition:width .6s"></div>
-        </div>
-        <div style="font-size:11px;color:var(--txt4);margin-top:4px">${sentPct}% ของทั้งหมด</div>
+      <div class="hero-badge">ADMIN</div>
+    </div>
+
+    <!-- KPI Row -->
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi-card ${curActive?'green':'red'}">
+        <div class="kpi-lbl">📅 สถานะเดือนนี้</div>
+        <div class="kpi-val" style="font-size:20px;color:${curActive?'var(--green)':'var(--red)'}">${curActive?'✅ Active':'🔒 Inactive'}</div>
+        <div class="kpi-hint">${ymToFull(curYM)}</div>
       </div>
-      <div class="card" style="flex:1;min-width:180px">
-        <div style="font-size:11px;font-weight:700;color:var(--txt3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">รายการรวมเดือนนี้</div>
-        <div style="font-size:28px;font-weight:900;font-family:var(--mono);color:var(--amber)">${fNum(curStat.totalItems)}</div>
-        <div style="font-size:12px;color:var(--txt3);margin-top:4px">QTY รวม ${fNum(curStat.totalQty,2)}</div>
+      <div class="kpi-card amber">
+        <div class="kpi-lbl">🏪 บันทึกแล้ว</div>
+        <div class="kpi-val">${curStores}</div>
+        <div class="kpi-hint">/ ${totalStoresAll} สาขา</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-lbl">📦 รายการรวม</div>
+        <div class="kpi-val">${fNum(curItems)}</div>
+        <div class="kpi-hint">QTY ${fNum(curQty,2)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-lbl">✅ เดือนที่เปิดอยู่</div>
+        <div class="kpi-val">${activeCount}</div>
+        <div class="kpi-hint">เดือน (Active)</div>
       </div>
     </div>
 
-    <!-- กราฟ Admin -->
+    <!-- Quick Action -->
     <div class="card" style="margin-bottom:14px">
       <div class="card-head">
-        <div class="card-title">📊 สถิติรายเดือน (ทุกสาขา) <span class="sub">12 เดือนล่าสุด</span></div>
+        <div class="card-title">⚡ Quick Action — เดือนปัจจุบัน</div>
         <button class="btn btn-blue btn-sm" onclick="go('monthcontrol')">📅 จัดการเดือน</button>
       </div>
-      ${adminChart}
-    </div>
-
-    <!-- สถานะเดือนล่าสุด -->
-    <div class="card">
-      <div class="card-head"><div class="card-title">📋 สรุปสถานะรายเดือน</div></div>
-      <div class="tbl-wrap">
-        <table class="dtbl">
-          <thead><tr><th>เดือน</th><th>ชื่อเดือน</th><th>สถานะ</th><th class="tr">สาขาบันทึก</th><th class="tr">รายการรวม</th><th class="tr">QTY รวม</th></tr></thead>
-          <tbody>
-            ${monthStats.slice(0,12).map(m=>`
-              <tr ${m.ym===curYM?'style="background:var(--blue-xxl)"':''}>
-                <td class="num" style="font-weight:${m.ym===curYM?'800':'400'}">${m.ym}</td>
-                <td>${ymToFull(m.ym)}</td>
-                <td><span class="pill ${m.active?'pill-ok':'pill-no'}">${m.active?'✅ Active':'🔒 Inactive'}</span></td>
-                <td class="tr num">${m.totalStores} / ${totalStores}</td>
-                <td class="tr num">${fNum(m.totalItems)}</td>
-                <td class="tr num">${fNum(m.totalQty,2)}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:14px;font-weight:700;color:var(--txt);margin-bottom:3px">${ymToFull(curYM)}</div>
+          <div style="font-size:13px;color:${curActive?'var(--green)':'var(--red)'};">${curActive?'✅ เปิดให้สาขาบันทึกอยู่':'🔒 ปิด — สาขาบันทึกไม่ได้'}</div>
+          <div style="height:6px;border-radius:3px;background:var(--surface3);margin-top:10px;overflow:hidden;max-width:240px">
+            <div style="height:100%;border-radius:3px;background:var(--blue);width:${sentPct}%;transition:width .6s"></div>
+          </div>
+          <div style="font-size:11px;color:var(--txt4);margin-top:3px">${sentPct}% ของสาขาบันทึกแล้ว</div>
+        </div>
+        <button class="btn" style="${curActive?'background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2)':'background:var(--green-bg);color:var(--green);border:1px solid rgba(13,159,110,.2)'};padding:11px 20px;font-weight:700;border-radius:var(--r8);cursor:pointer;font-size:13.5px" onclick="toggleMonth('${curYM}',${!curActive})">
+          ${curActive?'🔒 ปิดเดือนนี้':'✅ เปิดเดือนนี้'}
+        </button>
       </div>
-    </div>`;
-}
-
-function buildAdminBarChart(months, curYM){
-  if(!months.length) return '<p style="color:var(--txt3);text-align:center;padding:20px">ยังไม่มีข้อมูล</p>';
-  const W=600, H=220, PAD_L=40, PAD_B=50, PAD_T=20, PAD_R=10;
-  const chartW=W-PAD_L-PAD_R, chartH=H-PAD_B-PAD_T;
-  const n=months.length;
-  const bGroup=chartW/n;
-  const bW=Math.min(bGroup*0.5,28);
-  const maxStores=Math.max(...months.map(m=>m.totalStores),1);
-  const totalAll=STORES.length||1;
-
-  let bars='', labels='', grid='';
-  months.forEach((m,i)=>{
-    const x=PAD_L+i*bGroup+bGroup/2;
-    const h=Math.round((m.totalStores/totalAll)*chartH);
-    const isCur=m.ym===curYM;
-    bars+=`<rect x="${x-bW/2}" y="${PAD_T+chartH-h}" width="${bW}" height="${h}" rx="3"
-      fill="${m.active?(isCur?'#0B5FB4':'#3B83D4'):'#DDE3EC'}" opacity="${isCur?1:0.8}">
-      <title>${ymToThai(m.ym)}: ${m.totalStores}/${totalAll} สาขา</title></rect>`;
-    if(h>18&&m.totalStores>0){
-      bars+=`<text x="${x}" y="${PAD_T+chartH-h-4}" text-anchor="middle" font-size="9" fill="${m.active?'#0B5FB4':'#9AABBE'}" font-weight="700">${m.totalStores}</text>`;
-    }
-    labels+=`<text x="${x}" y="${PAD_T+chartH+16}" text-anchor="middle" font-size="9.5" fill="${isCur?'#0B5FB4':'#6B7A90'}" font-weight="${isCur?'700':'400'}">${ymToThai(m.ym)}</text>`;
-  });
-  for(let g=0;g<=4;g++){
-    const gy=PAD_T+chartH*(1-g/4);
-    grid+=`<line x1="${PAD_L}" y1="${gy}" x2="${W-PAD_R}" y2="${gy}" stroke="#DDE3EC" stroke-width="1"/>`;
-    if(g>0){const val=Math.round(totalAll*g/4);grid+=`<text x="${PAD_L-4}" y="${gy+4}" text-anchor="end" font-size="9" fill="#9AABBE">${val}</text>`;}
-  }
-  return `
-    <div style="overflow-x:auto">
-      <svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:360px;max-width:100%;display:block">
-        <rect x="${PAD_L}" y="${PAD_T}" width="${chartW}" height="${chartH}" fill="#F7F9FC" rx="4"/>
-        ${grid}${bars}${labels}
-        <line x1="${PAD_L}" y1="${PAD_T}" x2="${PAD_L}" y2="${PAD_T+chartH}" stroke="#DDE3EC" stroke-width="1"/>
-        <line x1="${PAD_L}" y1="${PAD_T+chartH}" x2="${W-PAD_R}" y2="${PAD_T+chartH}" stroke="#DDE3EC" stroke-width="1"/>
-      </svg>
     </div>
-    <div style="display:flex;gap:18px;margin-top:10px;justify-content:center;font-size:12px;color:var(--txt3)">
-      <span style="display:flex;align-items:center;gap:6px"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#3B83D4"></span>สาขาที่บันทึก (Active)</span>
-      <span style="display:flex;align-items:center;gap:6px"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#DDE3EC"></span>เดือน Inactive</span>
-    </div>`;
+
+    <!-- สาขาที่ยังไม่บันทึก -->
+    ${notSentStores.length>0?`
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title" style="color:var(--red)">⏳ ยังไม่บันทึก <span class="sub">${notSentStores.length} สาขา</span></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${notSentStores.slice(0,40).map(s=>`<span style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.15);border-radius:var(--r8);padding:4px 11px;font-size:12px;font-weight:600">${s.n} ${esc(s.name)}</span>`).join('')}
+        ${notSentStores.length>40?`<span style="color:var(--txt3);font-size:12px;padding:4px">...และอีก ${notSentStores.length-40} สาขา</span>`:''}
+      </div>
+    </div>`:'<div class="card tc" style="padding:20px;color:var(--green)"><b>✅ ทุกสาขาบันทึกข้อมูลแล้วเดือนนี้!</b></div>'}`;
 }
 
 /* ════════════════════════════════════════════
