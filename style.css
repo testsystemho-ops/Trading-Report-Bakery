@@ -537,3 +537,16 @@ mark.hl { background:#FFF3CD; border-radius:3px; padding:0 2px; }
 /* ═══ MONTH CONTROL TABLE HIGHLIGHT ═══ */
 .mc-active-row { background: var(--green-bg) !important; }
 .mc-inactive-row { background: var(--surface2); }
+
+/* ════ v5.1 NEW — Manage Items / Stores ════ */
+.btn-xs {
+  padding: 3px 9px !important;
+  font-size: 11px !important;
+  border-radius: var(--r8) !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  color: var(--txt2);
+}
+.btn-xs:hover { background: var(--surface3); }

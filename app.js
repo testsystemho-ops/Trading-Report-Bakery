@@ -73,10 +73,12 @@ const STORE_NAV=[
   {id:'history',   ico:'🗂️', lbl:'ประวัติ / Export'}
 ];
 const ADMIN_NAV=[
-  {id:'dashboard',   ico:'📊', lbl:'แดชบอร์ด & ภาพรวม'},
-  {id:'monthcontrol',ico:'📅', lbl:'จัดการเดือน (Month Control)'},
-  {id:'storedata',   ico:'🏪', lbl:'ดูข้อมูลรายสาขา'},
-  {id:'clearall',    ico:'🗑️', lbl:'ล้างข้อมูล'}
+  {id:'dashboard',     ico:'📊', lbl:'แดชบอร์ด & ภาพรวม'},
+  {id:'monthcontrol',  ico:'📅', lbl:'จัดการเดือน (Month Control)'},
+  {id:'storedata',     ico:'🏪', lbl:'ดูข้อมูลรายสาขา'},
+  {id:'manageitems',   ico:'📦', lbl:'จัดการรายการสินค้า'},
+  {id:'managestores',  ico:'🏬', lbl:'จัดการสาขา'},
+  {id:'clearall',      ico:'🗑️', lbl:'ล้างข้อมูล'}
 ];
 
 /* ════ ENTRY STATE ════ */
@@ -95,7 +97,7 @@ function buildNav(){
 }
 function setActive(id){document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.id===id));}
 let CURVIEW='';
-function go(id){CURVIEW=id;setActive(id);({dashboard:renderDashboard,entry:renderEntry,history:renderHistory,storedata:renderStoreData,monthcontrol:renderMonthControl,clearall:renderClearAll}[id]||function(){})();}
+function go(id){CURVIEW=id;setActive(id);({dashboard:renderDashboard,entry:renderEntry,history:renderHistory,storedata:renderStoreData,monthcontrol:renderMonthControl,clearall:renderClearAll,manageitems:renderManageItems,managestores:renderManageStores}[id]||function(){})();}
 
 /* ════ AUTH ════ */
 function initLogin(){
@@ -245,6 +247,9 @@ async function renderStoreDashboard(C){
 
     <button class="btn btn-primary" onclick="go('entry')" ${!curActive?'disabled title="Admin ยังไม่เปิดเดือนนี้"':''} style="${!curActive?'opacity:.55;cursor:not-allowed':''}">
       📝 ${curActive?'เริ่มบันทึกการตรวจนับ':'รอ Admin เปิดเดือนก่อนบันทึก'}
+    </button>
+    <button class="btn btn-secondary" onclick="exportStoreTemplate()" style="margin-top:10px">
+      📋 Export Template รายการสินค้า (สำหรับตรวจสอบล่วงหน้า)
     </button>`;
 }
 
@@ -596,7 +601,10 @@ async function renderHistory(){
     <div class="card">
       <div class="card-head">
         <div class="card-title">🗂️ ประวัติการบันทึก <span class="sub">${months.length} เดือน</span></div>
-        <button class="btn btn-primary" onclick="exportStoreAll()">📥 Export ทั้งหมด</button>
+        <div class="flex gap8 items-c">
+          <button class="btn btn-secondary" onclick="exportStoreTemplate()" title="Export รายการสินค้าทั้งหมด (ไม่มี QTY) เพื่อกรอกก่อนบันทึก">📋 Export Template</button>
+          <button class="btn btn-primary" onclick="exportStoreAll()">📥 Export ทั้งหมด</button>
+        </div>
       </div>
       <div class="tbl-wrap">
         <table class="dtbl">
@@ -981,6 +989,7 @@ async function doClear(){
 /* ════ BOOTSTRAP ════ */
 document.addEventListener('DOMContentLoaded', async () => {
   await loadData();
+  await loadMasterDataFromFB(); // [NEW] override items/stores from Firebase if admin has updated
   if(typeof LOGO_URI!=='undefined'){
     document.getElementById('loginLogo').src=LOGO_URI;
     document.getElementById('sbLogo').src=LOGO_URI;
@@ -994,3 +1003,481 @@ document.addEventListener('DOMContentLoaded', async () => {
   const ses=loadSes();
   if(ses){SES=ses;startApp();}
 });
+
+/* ════════════════════════════════════════════
+   [NEW v5.1] MASTER DATA — Firebase path:
+   masterData/items/{index}  (Array)
+   masterData/stores/{index} (Array)
+   ════════════════════════════════════════════ */
+
+/* ── โหลด masterData จาก Firebase (ถ้ามี override data.json) ── */
+async function loadMasterDataFromFB() {
+  try {
+    const md = await dbGet('masterData');
+    if (md) {
+      if (md.items && Array.isArray(md.items) && md.items.length > 0) {
+        ITEMS_DATA = md.items;
+        ALL_CLS = ['ALL', ...new Set(ITEMS_DATA.map(i => i.class).filter(Boolean))]
+          .sort((a, b) => {
+            if (a === 'ALL') return -1; if (b === 'ALL') return 1;
+            const na = Number(a), nb = Number(b);
+            if (!isNaN(na) && !isNaN(nb)) return na - nb;
+            return a.localeCompare(b);
+          });
+        console.log('[FB masterData] items overridden:', ITEMS_DATA.length);
+      }
+      if (md.stores && Array.isArray(md.stores) && md.stores.length > 0) {
+        STORES = md.stores;
+        console.log('[FB masterData] stores overridden:', STORES.length);
+      }
+    }
+  } catch (e) {
+    console.warn('loadMasterDataFromFB error:', e.message);
+  }
+}
+
+/* ════════════════════════════════════════════
+   [NEW] STORE: Export Template Excel (ก่อนบันทึก)
+   — Export รายการสินค้าทั้งหมด โดยไม่มีข้อมูล QTY
+   ════════════════════════════════════════════ */
+function exportStoreTemplate() {
+  toast('กำลังสร้าง Excel Template...');
+  const wb = XLSX.utils.book_new();
+  const rows = [
+    ['ลำดับ', 'Class', 'รหัสสินค้า', 'ชื่อสินค้า', 'QTY (กรอกเอง)']
+  ];
+  ITEMS_DATA.forEach(i => {
+    rows.push([i.no, i.class, i.code, i.name, '']);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  // กำหนดความกว้างคอลัมน์
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 8 }, { wch: 14 }, { wch: 48 }, { wch: 16 }
+  ];
+  XLSX.utils.book_append_sheet(wb, ws, 'รายการสินค้า');
+  XLSX.writeFile(wb, `BakeryTemplate_ST${SES.no}_${currentYM()}.xlsx`);
+  toast('Export Template สำเร็จ ✅', 'ok');
+}
+
+/* ════════════════════════════════════════════
+   [NEW] ADMIN: จัดการ Items (เพิ่ม / แก้ไข / ลบ)
+   ════════════════════════════════════════════ */
+let ITEM_SEARCH_Q = '';
+
+function renderManageItems() {
+  setTB('จัดการรายการสินค้า', 'Admin — Items');
+  const C = document.getElementById('content');
+  buildManageItemsView(C);
+}
+
+function buildManageItemsView(C) {
+  const filtered = ITEM_SEARCH_Q
+    ? ITEMS_DATA.filter(i =>
+        i.code.toLowerCase().includes(ITEM_SEARCH_Q.toLowerCase()) ||
+        i.name.toLowerCase().includes(ITEM_SEARCH_Q.toLowerCase()) ||
+        String(i.class).includes(ITEM_SEARCH_Q))
+    : ITEMS_DATA;
+
+  const rows = filtered.map((it, idx) => `
+    <tr>
+      <td class="code-cell">${it.no}</td>
+      <td><span class="cls-badge">${esc(String(it.class))}</span></td>
+      <td class="code-cell">${esc(it.code)}</td>
+      <td style="white-space:normal;line-height:1.35;max-width:320px">${esc(it.name)}</td>
+      <td class="tr" style="white-space:nowrap">
+        <button class="btn btn-secondary btn-xs" onclick="showEditItemModal(${ITEMS_DATA.indexOf(it)})">✏️ แก้ไข</button>
+        <button class="btn btn-xs" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);cursor:pointer;padding:3px 8px;border-radius:var(--r8);font-size:11px;font-weight:600" onclick="confirmDeleteItem(${ITEMS_DATA.indexOf(it)})">🗑️ ลบ</button>
+      </td>
+    </tr>`).join('');
+
+  C.innerHTML = `
+    <div class="card" style="margin-bottom:14px;border-left:4px solid var(--blue)">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="font-size:36px">📦</div>
+        <div>
+          <div style="font-size:15px;font-weight:800;color:var(--txt)">จัดการรายการสินค้า</div>
+          <div style="font-size:13px;color:var(--txt3);margin-top:4px">เพิ่ม แก้ไข หรือลบรายการสินค้าที่แสดงในทุกสาขา · <b style="color:var(--blue)">${ITEMS_DATA.length} รายการ</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">📦 รายการสินค้าทั้งหมด <span class="sub">${ITEMS_DATA.length} รายการ</span></div>
+        <div class="flex gap8 items-c">
+          <button class="btn btn-blue" onclick="showAddItemModal()">➕ เพิ่มสินค้า</button>
+          <button class="btn btn-secondary btn-sm" onclick="renderManageItems()">🔄 รีเฟรช</button>
+        </div>
+      </div>
+
+      <div class="filter-bar" style="margin-bottom:12px">
+        <div class="flex-1">
+          <label class="flabel">🔍 ค้นหาสินค้า</label>
+          <div class="search-wrap">
+            <span class="search-ico">🔍</span>
+            <input type="text" class="ctrl" id="itemSearchInp" placeholder="ชื่อสินค้า, รหัส, Class..." value="${esc(ITEM_SEARCH_Q)}"
+              oninput="ITEM_SEARCH_Q=this.value;buildManageItemsView(document.getElementById('content'))">
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:10px;padding:10px 14px;background:var(--warn-bg);border-radius:var(--r8);border:1px solid rgba(212,139,10,.2);font-size:12.5px;color:var(--warn)">
+        ⚠️ <b>การเปลี่ยนแปลงจะมีผลทันทีกับทุกสาขา</b> — ข้อมูลจะถูกบันทึกลง Firebase และโหลดใหม่อัตโนมัติเมื่อ Login ครั้งถัดไป
+      </div>
+
+      <div class="tbl-wrap" style="max-height:65vh">
+        <table class="dtbl">
+          <thead>
+            <tr>
+              <th style="width:44px">No.</th>
+              <th style="width:68px">Class</th>
+              <th style="width:104px">รหัส</th>
+              <th>ชื่อสินค้า</th>
+              <th style="width:120px;text-align:right">จัดการ</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="5" class="tc muted" style="padding:28px">ไม่พบรายการ</td></tr>'}</tbody>
+          <tfoot>
+            <tr><td colspan="5" class="tr" style="font-size:12px;color:var(--txt3)">แสดง ${filtered.length} / ${ITEMS_DATA.length} รายการ</td></tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>`;
+}
+
+function showAddItemModal() {
+  const clsOptions = [...new Set(ITEMS_DATA.map(i => i.class).filter(Boolean))]
+    .sort((a, b) => { const na = Number(a), nb = Number(b); return (!isNaN(na) && !isNaN(nb)) ? na - nb : a.localeCompare(b); })
+    .map(c => `<option value="${c}">Class ${c}</option>`).join('');
+  const nextNo = ITEMS_DATA.length > 0 ? Math.max(...ITEMS_DATA.map(i => Number(i.no) || 0)) + 1 : 1;
+
+  showModal(`
+    <h3>➕ เพิ่มรายการสินค้าใหม่</h3>
+    <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label class="flabel">Class <span style="color:var(--red)">*</span></label>
+        <div style="display:flex;gap:8px">
+          <select class="ctrl" id="mi_cls" style="flex:1">${clsOptions}</select>
+          <input type="text" class="ctrl" id="mi_cls_new" placeholder="หรือพิมพ์ Class ใหม่" style="flex:1">
+        </div>
+        <div style="font-size:11px;color:var(--txt3);margin-top:3px">เลือก Class ที่มีอยู่ หรือพิมพ์ Class ใหม่ในช่องขวา</div>
+      </div>
+      <div>
+        <label class="flabel">รหัสสินค้า <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="mi_code" placeholder="เช่น 123456">
+      </div>
+      <div>
+        <label class="flabel">ชื่อสินค้า <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="mi_name" placeholder="ชื่อสินค้า">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-blue" onclick="doAddItem(${nextNo})">➕ เพิ่มสินค้า</button>
+    </div>`);
+}
+
+async function doAddItem(nextNo) {
+  const clsSel = document.getElementById('mi_cls').value.trim();
+  const clsNew = document.getElementById('mi_cls_new').value.trim();
+  const cls = clsNew || clsSel;
+  const code = document.getElementById('mi_code').value.trim();
+  const name = document.getElementById('mi_name').value.trim();
+  if (!cls || !code || !name) { toast('กรุณากรอกข้อมูลให้ครบถ้วน', 'err'); return; }
+  if (ITEMS_DATA.find(i => i.code === code)) { toast('รหัสสินค้านี้มีอยู่แล้ว', 'err'); return; }
+  const newItem = { no: nextNo, class: cls, code, name };
+  const newItems = [...ITEMS_DATA, newItem];
+  closeModal();
+  await saveMasterItems(newItems, `เพิ่มสินค้า ${code} — ${name} แล้ว ✅`);
+}
+
+function showEditItemModal(idx) {
+  const it = ITEMS_DATA[idx];
+  if (!it) return;
+  const clsOptions = [...new Set(ITEMS_DATA.map(i => i.class).filter(Boolean))]
+    .sort((a, b) => { const na = Number(a), nb = Number(b); return (!isNaN(na) && !isNaN(nb)) ? na - nb : a.localeCompare(b); })
+    .map(c => `<option value="${c}" ${c === String(it.class) ? 'selected' : ''}>Class ${c}</option>`).join('');
+
+  showModal(`
+    <h3>✏️ แก้ไขสินค้า</h3>
+    <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label class="flabel">Class <span style="color:var(--red)">*</span></label>
+        <div style="display:flex;gap:8px">
+          <select class="ctrl" id="ei_cls" style="flex:1">${clsOptions}</select>
+          <input type="text" class="ctrl" id="ei_cls_new" placeholder="พิมพ์ Class ใหม่" style="flex:1">
+        </div>
+      </div>
+      <div>
+        <label class="flabel">รหัสสินค้า</label>
+        <input type="text" class="ctrl w100" id="ei_code" value="${esc(it.code)}" readonly style="background:var(--surface2);color:var(--txt3)">
+      </div>
+      <div>
+        <label class="flabel">ชื่อสินค้า <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="ei_name" value="${esc(it.name)}">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-blue" onclick="doEditItem(${idx})">💾 บันทึกการแก้ไข</button>
+    </div>`);
+}
+
+async function doEditItem(idx) {
+  const clsSel = document.getElementById('ei_cls').value.trim();
+  const clsNew = document.getElementById('ei_cls_new').value.trim();
+  const cls = clsNew || clsSel;
+  const name = document.getElementById('ei_name').value.trim();
+  if (!cls || !name) { toast('กรุณากรอกข้อมูลให้ครบถ้วน', 'err'); return; }
+  const newItems = ITEMS_DATA.map((it, i) => i === idx ? { ...it, class: cls, name } : it);
+  closeModal();
+  await saveMasterItems(newItems, `แก้ไขสินค้า ${ITEMS_DATA[idx].code} แล้ว ✅`);
+}
+
+function confirmDeleteItem(idx) {
+  const it = ITEMS_DATA[idx];
+  showModal(`
+    <h3 style="color:var(--red)">🗑️ ยืนยันการลบสินค้า</h3>
+    <p style="color:var(--txt2);margin-top:10px">
+      ต้องการลบสินค้า <b>${esc(it.code)} — ${esc(it.name)}</b> ใช่หรือไม่?<br>
+      <span style="color:var(--txt3);font-size:12px">⚠️ ข้อมูลที่สาขาบันทึกไว้จะยังคงอยู่ แต่จะไม่แสดงในรายการอีกต่อไป</span>
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-danger" onclick="doDeleteItem(${idx})">🗑️ ลบสินค้า</button>
+    </div>`);
+}
+
+async function doDeleteItem(idx) {
+  const it = ITEMS_DATA[idx];
+  const newItems = ITEMS_DATA.filter((_, i) => i !== idx)
+    .map((item, i) => ({ ...item, no: i + 1 }));
+  closeModal();
+  await saveMasterItems(newItems, `ลบสินค้า ${it.code} แล้ว`);
+}
+
+async function saveMasterItems(newItems, successMsg) {
+  try {
+    await dbSet('masterData/items', newItems);
+    ITEMS_DATA = newItems;
+    ALL_CLS = ['ALL', ...new Set(ITEMS_DATA.map(i => i.class).filter(Boolean))]
+      .sort((a, b) => {
+        if (a === 'ALL') return -1; if (b === 'ALL') return 1;
+        const na = Number(a), nb = Number(b);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.localeCompare(b);
+      });
+    toast(successMsg || 'บันทึกแล้ว ✅', 'ok');
+    buildManageItemsView(document.getElementById('content'));
+  } catch (e) {
+    toast('เกิดข้อผิดพลาด: ' + e.message, 'err');
+  }
+}
+
+/* ════════════════════════════════════════════
+   [NEW] ADMIN: จัดการ Stores (เพิ่มสาขาใหม่)
+   ════════════════════════════════════════════ */
+let STORE_SEARCH_Q = '';
+
+function renderManageStores() {
+  setTB('จัดการสาขา', 'Admin — Stores');
+  const C = document.getElementById('content');
+  buildManageStoresView(C);
+}
+
+function buildManageStoresView(C) {
+  const filtered = STORE_SEARCH_Q
+    ? STORES.filter(s =>
+        String(s.n).includes(STORE_SEARCH_Q) ||
+        s.name.toLowerCase().includes(STORE_SEARCH_Q.toLowerCase()) ||
+        (s.u || '').toLowerCase().includes(STORE_SEARCH_Q.toLowerCase()))
+    : STORES;
+
+  const rows = filtered.map((s) => `
+    <tr>
+      <td class="bold num">${s.n}</td>
+      <td>${esc(s.name)}</td>
+      <td class="code-cell">${esc(s.u)}</td>
+      <td class="code-cell">${esc(s.p)}</td>
+      <td class="tr" style="white-space:nowrap">
+        <button class="btn btn-secondary btn-xs" onclick="showEditStoreModal('${s.n}')">✏️ แก้ไข</button>
+        <button class="btn btn-xs" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);cursor:pointer;padding:3px 8px;border-radius:var(--r8);font-size:11px;font-weight:600" onclick="confirmDeleteStore('${s.n}')">🗑️ ลบ</button>
+      </td>
+    </tr>`).join('');
+
+  C.innerHTML = `
+    <div class="card" style="margin-bottom:14px;border-left:4px solid var(--amber)">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="font-size:36px">🏪</div>
+        <div>
+          <div style="font-size:15px;font-weight:800;color:var(--txt)">จัดการสาขา</div>
+          <div style="font-size:13px;color:var(--txt3);margin-top:4px">เพิ่ม แก้ไข หรือลบสาขา · <b style="color:var(--amber)">${STORES.length} สาขา</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">🏪 รายการสาขาทั้งหมด <span class="sub">${STORES.length} สาขา</span></div>
+        <div class="flex gap8 items-c">
+          <button class="btn btn-blue" onclick="showAddStoreModal()">➕ เพิ่มสาขาใหม่</button>
+          <button class="btn btn-secondary btn-sm" onclick="renderManageStores()">🔄 รีเฟรช</button>
+        </div>
+      </div>
+
+      <div class="filter-bar" style="margin-bottom:12px">
+        <div class="flex-1">
+          <label class="flabel">🔍 ค้นหาสาขา</label>
+          <div class="search-wrap">
+            <span class="search-ico">🔍</span>
+            <input type="text" class="ctrl" id="storeSearchInp" placeholder="เลขสาขา, ชื่อสาขา, Username..."
+              value="${esc(STORE_SEARCH_Q)}"
+              oninput="STORE_SEARCH_Q=this.value;buildManageStoresView(document.getElementById('content'))">
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:10px;padding:10px 14px;background:var(--warn-bg);border-radius:var(--r8);border:1px solid rgba(212,139,10,.2);font-size:12.5px;color:var(--warn)">
+        ⚠️ <b>สาขาที่เพิ่มใหม่จาก Firebase จะ Login และใช้งานได้เหมือนสาขาเดิมทุกประการ</b>
+      </div>
+
+      <div class="tbl-wrap" style="max-height:65vh">
+        <table class="dtbl">
+          <thead>
+            <tr>
+              <th style="width:60px">เลขสาขา</th>
+              <th>ชื่อสาขา</th>
+              <th style="width:110px">Username</th>
+              <th style="width:100px">Password</th>
+              <th style="width:120px;text-align:right">จัดการ</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="5" class="tc muted" style="padding:28px">ไม่พบสาขา</td></tr>'}</tbody>
+          <tfoot>
+            <tr><td colspan="5" class="tr" style="font-size:12px;color:var(--txt3)">แสดง ${filtered.length} / ${STORES.length} สาขา</td></tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>`;
+}
+
+function showAddStoreModal() {
+  showModal(`
+    <h3>➕ เพิ่มสาขาใหม่</h3>
+    <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label class="flabel">เลขสาขา <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="as_n" placeholder="เช่น 999" oninput="autoFillStoreUser()">
+        <div style="font-size:11px;color:var(--txt3);margin-top:3px">ตัวเลข เช่น 11, 999 — จะใช้เป็น store011, store999</div>
+      </div>
+      <div>
+        <label class="flabel">ชื่อสาขา <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="as_name" placeholder="เช่น พิษณุโลก">
+      </div>
+      <div>
+        <label class="flabel">Username <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="as_u" placeholder="store011">
+        <div style="font-size:11px;color:var(--txt3);margin-top:3px">กรอกเลขสาขาแล้ว Username จะถูกสร้างอัตโนมัติ</div>
+      </div>
+      <div>
+        <label class="flabel">Password <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="as_p" value="welcome1" placeholder="welcome1">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-blue" onclick="doAddStore()">➕ เพิ่มสาขา</button>
+    </div>`);
+}
+
+function autoFillStoreUser() {
+  const nVal = document.getElementById('as_n')?.value.trim();
+  const uInp = document.getElementById('as_u');
+  if (nVal && uInp) {
+    uInp.value = 'store' + String(nVal).padStart(3, '0');
+  }
+}
+
+async function doAddStore() {
+  const n = document.getElementById('as_n').value.trim();
+  const name = document.getElementById('as_name').value.trim();
+  const u = document.getElementById('as_u').value.trim().toLowerCase();
+  const p = document.getElementById('as_p').value.trim();
+  if (!n || !name || !u || !p) { toast('กรุณากรอกข้อมูลให้ครบถ้วน', 'err'); return; }
+  if (STORES.find(s => String(s.n) === String(n))) { toast('เลขสาขา ' + n + ' มีอยู่แล้ว', 'err'); return; }
+  if (STORES.find(s => s.u === u)) { toast('Username "' + u + '" มีอยู่แล้ว', 'err'); return; }
+  const newStore = { n, name, u, p };
+  const newStores = [...STORES, newStore].sort((a, b) => Number(a.n) - Number(b.n));
+  closeModal();
+  await saveMasterStores(newStores, `เพิ่มสาขา ${n} ${name} แล้ว ✅`);
+}
+
+function showEditStoreModal(storeN) {
+  const s = STORES.find(st => String(st.n) === String(storeN));
+  if (!s) return;
+  showModal(`
+    <h3>✏️ แก้ไขสาขา ${s.n}</h3>
+    <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label class="flabel">เลขสาขา</label>
+        <input type="text" class="ctrl w100" value="${esc(String(s.n))}" readonly style="background:var(--surface2);color:var(--txt3)">
+      </div>
+      <div>
+        <label class="flabel">ชื่อสาขา <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="es_name" value="${esc(s.name)}">
+      </div>
+      <div>
+        <label class="flabel">Username</label>
+        <input type="text" class="ctrl w100" value="${esc(s.u)}" readonly style="background:var(--surface2);color:var(--txt3)">
+      </div>
+      <div>
+        <label class="flabel">Password <span style="color:var(--red)">*</span></label>
+        <input type="text" class="ctrl w100" id="es_p" value="${esc(s.p)}">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-blue" onclick="doEditStore('${s.n}')">💾 บันทึก</button>
+    </div>`);
+}
+
+async function doEditStore(storeN) {
+  const name = document.getElementById('es_name').value.trim();
+  const p = document.getElementById('es_p').value.trim();
+  if (!name || !p) { toast('กรุณากรอกข้อมูลให้ครบถ้วน', 'err'); return; }
+  const newStores = STORES.map(s => String(s.n) === String(storeN) ? { ...s, name, p } : s);
+  closeModal();
+  await saveMasterStores(newStores, `แก้ไขสาขา ${storeN} แล้ว ✅`);
+}
+
+function confirmDeleteStore(storeN) {
+  const s = STORES.find(st => String(st.n) === String(storeN));
+  showModal(`
+    <h3 style="color:var(--red)">🗑️ ยืนยันการลบสาขา</h3>
+    <p style="color:var(--txt2);margin-top:10px">
+      ต้องการลบสาขา <b>${s.n} — ${esc(s.name)}</b> ใช่หรือไม่?<br>
+      <span style="color:var(--txt3);font-size:12px">⚠️ ข้อมูลการบันทึกของสาขานี้ใน Firebase จะยังคงอยู่</span>
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-danger" onclick="doDeleteStore('${storeN}')">🗑️ ลบสาขา</button>
+    </div>`);
+}
+
+async function doDeleteStore(storeN) {
+  const s = STORES.find(st => String(st.n) === String(storeN));
+  const newStores = STORES.filter(st => String(st.n) !== String(storeN));
+  closeModal();
+  await saveMasterStores(newStores, `ลบสาขา ${storeN} ${s ? s.name : ''} แล้ว`);
+}
+
+async function saveMasterStores(newStores, successMsg) {
+  try {
+    await dbSet('masterData/stores', newStores);
+    STORES = newStores;
+    toast(successMsg || 'บันทึกแล้ว ✅', 'ok');
+    buildManageStoresView(document.getElementById('content'));
+  } catch (e) {
+    toast('เกิดข้อผิดพลาด: ' + e.message, 'err');
+  }
+}

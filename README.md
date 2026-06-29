@@ -110,3 +110,50 @@ Firebase Console → Authentication → Settings → Authorized domains
 ---
 
 *CP Axtra — Store Operations · v4.1 Multi-file Edition*
+
+---
+
+## ✨ ฟีเจอร์ใหม่ v5.1
+
+### 📋 Store: Export Template รายการสินค้า
+- **สาขาสามารถ Export** รายการสินค้าทั้งหมด (ไม่มีข้อมูล QTY) ออกเป็นไฟล์ Excel
+- ใช้สำหรับ **ตรวจสอบล่วงหน้าก่อนนับสต็อก** แล้วนำค่า QTY กรอกเข้าระบบ
+- ปุ่มอยู่ที่: **แดชบอร์ด** → "📋 Export Template รายการสินค้า" และ **ประวัติ / Export** → "📋 Export Template"
+
+### 📦 Admin: จัดการรายการสินค้า
+- เมนูใหม่: **📦 จัดการรายการสินค้า**
+- **เพิ่มสินค้าใหม่**: ระบุ Class, รหัส, ชื่อสินค้า
+- **แก้ไขสินค้า**: แก้ Class หรือชื่อสินค้า (รหัสเปลี่ยนไม่ได้)
+- **ลบสินค้า**: ข้อมูลที่สาขาบันทึกไว้ยังคงอยู่ใน Firebase
+- **ข้อมูลเก็บใน Firebase**: `masterData/items` — มีผลกับทุกสาขาทันทีเมื่อ Login ครั้งถัดไป
+
+### 🏬 Admin: จัดการสาขา
+- เมนูใหม่: **🏬 จัดการสาขา**
+- **เพิ่มสาขาใหม่**: ระบุเลขสาขา, ชื่อสาขา, Username (auto-fill), Password
+- **แก้ไขสาขา**: แก้ชื่อสาขาหรือ Password
+- **ลบสาขา**: ข้อมูลใน Firebase ยังคงอยู่
+- **สาขาที่เพิ่มจาก Admin** จะ Login และใช้งานได้เหมือนสาขาใน `data.json` ทุกประการ
+- **ข้อมูลเก็บใน Firebase**: `masterData/stores`
+
+### 🔄 กลไก Override
+เมื่อ Admin เพิ่มสินค้าหรือสาขาผ่านหน้าจัดการ ข้อมูลจะถูกบันทึกลง Firebase path `masterData/`
+เมื่อผู้ใช้ทุกคน (ทั้ง admin และ store) เปิด App ครั้งถัดไป ระบบจะ:
+1. โหลด `data.json` ก่อน (ข้อมูล default)
+2. ดึง `masterData/` จาก Firebase และ **override** ข้อมูลเดิม
+
+> **หมายเหตุ**: ถ้าต้องการเพิ่มสินค้า/สาขาถาวร แนะนำให้แก้ `data.json` ด้วย เพื่อเป็น fallback กรณี Firebase ล่ม
+
+### Firebase Rules (เพิ่มเติม)
+```json
+{
+  "rules": {
+    ".read": true,
+    ".write": true
+  }
+}
+```
+ใช้ Rules เดิมได้เลย ไม่ต้องเปลี่ยน
+
+---
+
+*CP Axtra — Store Operations · v5.1 New Features Edition*
