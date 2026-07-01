@@ -96,6 +96,8 @@ const ADMIN_NAV=[
   {id:'dashboard',     ico:'📊', lbl:'แดชบอร์ด & ภาพรวม'},
   {id:'monthcontrol',  ico:'📅', lbl:'จัดการเดือน (Month Control)'},
   {id:'storedata',     ico:'🏪', lbl:'ดูข้อมูลรายสาขา'},
+  {id:'storestatus',   ico:'📋', lbl:'สถานะการบันทึก'},
+  {id:'presence',      ico:'🟢', lbl:'สาขาออนไลน์'},
   {id:'manageitems',   ico:'📦', lbl:'จัดการรายการสินค้า'},
   {id:'managestores',  ico:'🏬', lbl:'จัดการสาขา'},
   {id:'clearall',      ico:'🗑️', lbl:'ล้างข้อมูล'}
@@ -117,7 +119,7 @@ function buildNav(){
 }
 function setActive(id){document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.id===id));}
 let CURVIEW='';
-function go(id){CURVIEW=id;setActive(id);({dashboard:renderDashboard,entry:renderEntry,history:renderHistory,storedata:renderStoreData,monthcontrol:renderMonthControl,clearall:renderClearAll,manageitems:renderManageItems,managestores:renderManageStores}[id]||function(){})();}
+function go(id){CURVIEW=id;setActive(id);({dashboard:renderDashboard,entry:renderEntry,history:renderHistory,storedata:renderStoreData,monthcontrol:renderMonthControl,clearall:renderClearAll,manageitems:renderManageItems,managestores:renderManageStores,storestatus:renderStoreStatus,presence:renderPresence}[id]||function(){})();}
 
 /* ════ AUTH ════ */
 function initLogin(){
@@ -131,6 +133,7 @@ function initLogin(){
     const err=document.getElementById('loginErr');err.style.display='block';setTimeout(()=>err.style.display='none',3000);
   });
   document.getElementById('logoutBtn').addEventListener('click',()=>{
+    cleanupPresence();
     clearSes();SES=null;
     document.getElementById('app').classList.add('hidden');
     document.getElementById('loginScreen').classList.remove('hidden');
@@ -147,7 +150,60 @@ function startApp(){
   const av=document.getElementById('sbAvatar');
   if(isAdmin){av.textContent='👑';av.classList.add('admin');}else{av.textContent='🏪';}
   initFBConnectionMonitor(); // [NEW] monitor connection state
+  if(!isAdmin) initPresence(); // เริ่ม presence tracking สำหรับ store
   buildNav();go('dashboard');
+}
+
+/* ════ PRESENCE SYSTEM ════
+   Firebase path: presence/{storeNo}
+   { no, name, loginAt, lastSeen, ua, online:true }
+   ใช้ onDisconnect() + .info/connected สำหรับ reliable presence
+════════════════════════════════════════════ */
+let _presenceRef = null;
+let _presenceInterval = null;
+let _connectedRef = null;
+
+async function initPresence(){
+  if(!fbOk || SES.role !== 'store') return;
+  const path = `presence/${SES.no}`;
+  _presenceRef = db.ref(path);
+
+  /* ใช้ .info/connected เพื่อรู้ว่า connected จริงๆ ก่อน set presence */
+  _connectedRef = db.ref('.info/connected');
+  _connectedRef.on('value', async (snap) => {
+    if(snap.val() !== true) return;
+    /* เมื่อ disconnect → Firebase server จะ set online=false ทันที */
+    await _presenceRef.onDisconnect().update({
+      online: false,
+      lastSeen: firebase.database.ServerValue.TIMESTAMP
+    });
+    /* เขียน presence ทันทีที่ connected */
+    await _presenceRef.set({
+      no: String(SES.no),
+      name: SES.name,
+      loginAt: Date.now(),
+      lastSeen: Date.now(),
+      ua: navigator.userAgent,
+      online: true
+    });
+  });
+  /* heartbeat ทุก 30 วินาที */
+  _presenceInterval = setInterval(async () => {
+    if(_presenceRef && FB_ONLINE){
+      try { await _presenceRef.update({ lastSeen: Date.now(), online: true }); }
+      catch(e) { /* ignore */ }
+    }
+  }, 30000);
+}
+
+function cleanupPresence(){
+  if(_connectedRef){ _connectedRef.off(); _connectedRef = null; }
+  if(_presenceRef){
+    _presenceRef.onDisconnect().cancel();
+    _presenceRef.update({ online: false, lastSeen: Date.now() });
+    _presenceRef = null;
+  }
+  if(_presenceInterval){ clearInterval(_presenceInterval); _presenceInterval = null; }
 }
 
 /* ════════════════════════════════════════════
@@ -869,63 +925,94 @@ async function exportStoreAll(){
 /* ════════════════════════════════════════════
    ADMIN DASHBOARD
 ════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════
+   ADMIN DASHBOARD v5.3 — เลือกเดือนได้ + 2-col store status
+═══════════════════════════════════════════════════ */
+let DASH_YM = currentYM();
+
 async function renderAdminDashboard(C){
   setTB('แดชบอร์ด & ภาพรวม','Admin');
   C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
-
   const mc = await getMonthControl();
+  if(!DASH_YM) DASH_YM = currentYM();
+  await renderAdminDashboardForYM(C, mc, DASH_YM);
+}
+
+async function renderAdminDashboardForYM(C, mc, selYM){
   const curYM = currentYM();
-  const curActive = mc[curYM] && mc[curYM].active === true;
   const allE = await dbGet('entries') || {};
-
-  // คำนวณสถิติเดือนปัจจุบัน
+  const months = generateMonthList();
+  const activeCount = months.filter(ym=>mc[ym]&&mc[ym].active===true).length;
+  const selActive = mc[selYM] && mc[selYM].active === true;
   const totalStoresAll = STORES.length;
-  let curStores=0, curItems=0, curQty=0;
+
+  let selStores=0, selItems=0, selQty=0;
+  const sentStoreNos = new Set();
   Object.keys(allE).forEach(sNo=>{
-    const mData=(allE[sNo]||{})[curYM]||{};
+    const mData=(allE[sNo]||{})[selYM]||{};
     const f=Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length;
-    if(f>0){ curStores++; curItems+=f; curQty+=Object.values(mData).reduce((s,v)=>s+(parseFloat(v)||0),0); }
+    if(f>0){ selStores++; selItems+=f; selQty+=Object.values(mData).reduce((s,v)=>s+(parseFloat(v)||0),0); sentStoreNos.add(String(sNo)); }
   });
-  const sentPct=totalStoresAll>0?Math.round(curStores/totalStoresAll*100):0;
+  const sentPct=totalStoresAll>0?Math.round(selStores/totalStoresAll*100):0;
+  const sentList = STORES.filter(s=>sentStoreNos.has(String(s.n)));
+  const notSentList = STORES.filter(s=>!sentStoreNos.has(String(s.n)));
 
-  // Active months count
-  const months=generateMonthList();
-  const activeCount=months.filter(ym=>mc[ym]&&mc[ym].active===true).length;
+  const pastMonths   = months.filter(ym=>ym < curYM).reverse();
+  const futureMonths = months.filter(ym=>ym > curYM);
+  const makeOpt2 = ym => {
+    const isAct = mc[ym]&&mc[ym].active===true;
+    return `<option value="${ym}" ${selYM===ym?'selected':''} >${isAct?'✅':'🔒'} ${ym} — ${ymToFull(ym)}</option>`;
+  };
+  const ymOpts2 = `
+    <optgroup label="📅 เดือนปัจจุบัน">${makeOpt2(curYM)}</optgroup>
+    <optgroup label="↩️ ย้อนหลัง (${pastMonths.length})">${pastMonths.map(makeOpt2).join('')}</optgroup>
+    <optgroup label="🔮 อนาคต (${futureMonths.length})">${futureMonths.map(makeOpt2).join('')}</optgroup>`;
 
-  // สาขาที่ยังไม่บันทึกเดือนนี้
-  const notSentStores=STORES.filter(s=>{
-    const mData=(allE[String(s.n)]||{})[curYM]||{};
-    return Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length===0;
-  });
+  const logs = await dbGet('logs') || {};
+  const lastSaveMap = {};
+  Object.values(logs).forEach(l=>{ if(l&&l.no&&l.ym===selYM){ if(!lastSaveMap[l.no]||l.ts>lastSaveMap[l.no]) lastSaveMap[l.no]=l.ts; } });
+  const pastActive = months.filter(ym=>ym<curYM && mc[ym]&&mc[ym].active===true).reverse();
+
+  const isPast = selYM < curYM;
+  const isCur  = selYM === curYM;
+  const periodBadge = isCur
+    ? `<span style="font-size:11px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:2px 8px">ปัจจุบัน</span>`
+    : isPast
+      ? `<span style="font-size:11px;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:2px 8px">↩️ ย้อนหลัง</span>`
+      : `<span style="font-size:11px;background:var(--surface3);color:var(--txt3);border-radius:999px;padding:2px 8px">🔮 อนาคต</span>`;
 
   C.innerHTML=`
     <div class="hero-card" style="margin-bottom:16px">
       <div class="hero-blob"></div>
-      <div class="hero-icon">🏪</div>
+      <div class="hero-icon">📊</div>
       <div class="hero-content">
-        <div class="hero-lbl">สาขาที่บันทึกแล้วเดือนนี้ — ${ymToFull(curYM)}</div>
-        <div class="hero-val num">${curStores}<span style="font-size:22px;opacity:.65"> / ${totalStoresAll}</span></div>
-        <div class="hero-hint">${sentPct}% · ${curActive?'<span style="color:#7DFFD0">✅ เปิดบันทึก</span>':'<span style="color:#FFCDD2">🔒 ยังไม่เปิด</span>'}</div>
+        <div class="hero-lbl">สถานะการบันทึกข้อมูล</div>
+        <div class="hero-val num">${selStores}<span style="font-size:22px;opacity:.65"> / ${totalStoresAll}</span></div>
+        <div class="hero-hint">${sentPct}% · ${selActive?'<span style="color:#7DFFD0">✅ เปิดบันทึก</span>':'<span style="color:#FFCDD2">🔒 ปิด</span>'}</div>
       </div>
-      <div class="hero-badge">ADMIN</div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+        <div class="hero-badge">ADMIN</div>
+        <select class="ctrl" id="dashYMSel" style="font-size:12px;min-width:220px;background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3)" onchange="onDashYMChange(this.value)">
+          ${ymOpts2}
+        </select>
+      </div>
     </div>
 
-    <!-- KPI Row -->
     <div class="kpi-grid" style="margin-bottom:14px">
-      <div class="kpi-card ${curActive?'green':'red'}">
-        <div class="kpi-lbl">📅 สถานะเดือนนี้</div>
-        <div class="kpi-val" style="font-size:20px;color:${curActive?'var(--green)':'var(--red)'}">${curActive?'✅ Active':'🔒 Inactive'}</div>
-        <div class="kpi-hint">${ymToFull(curYM)}</div>
+      <div class="kpi-card ${selActive?'green':'red'}">
+        <div class="kpi-lbl">📅 สถานะเดือนที่เลือก</div>
+        <div class="kpi-val" style="font-size:18px;color:${selActive?'var(--green)':'var(--red)'}">${selActive?'✅ Active':'🔒 Inactive'}</div>
+        <div class="kpi-hint">${ymToFull(selYM)}</div>
       </div>
       <div class="kpi-card amber">
         <div class="kpi-lbl">🏪 บันทึกแล้ว</div>
-        <div class="kpi-val">${curStores}</div>
-        <div class="kpi-hint">/ ${totalStoresAll} สาขา</div>
+        <div class="kpi-val">${selStores}</div>
+        <div class="kpi-hint">/ ${totalStoresAll} สาขา (${sentPct}%)</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-lbl">📦 รายการรวม</div>
-        <div class="kpi-val">${fNum(curItems)}</div>
-        <div class="kpi-hint">QTY ${fNum(curQty,2)}</div>
+        <div class="kpi-val">${fNum(selItems)}</div>
+        <div class="kpi-hint">QTY ${fNum(selQty,2)}</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-lbl">✅ เดือนที่เปิดอยู่</div>
@@ -934,54 +1021,101 @@ async function renderAdminDashboard(C){
       </div>
     </div>
 
-    <!-- Quick Action -->
     <div class="card" style="margin-bottom:14px">
       <div class="card-head">
-        <div class="card-title">⚡ Quick Action — เดือนปัจจุบัน</div>
+        <div class="card-title">⚡ Quick Action — ${ymToFull(selYM)} ${periodBadge}</div>
         <button class="btn btn-blue btn-sm" onclick="go('monthcontrol')">📅 จัดการเดือน</button>
       </div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <div style="flex:1;min-width:200px">
-          <div style="font-size:14px;font-weight:700;color:var(--txt);margin-bottom:3px">${ymToFull(curYM)}</div>
-          <div style="font-size:13px;color:${curActive?'var(--green)':'var(--red)'};">${curActive?'✅ เปิดให้สาขาบันทึกอยู่':'🔒 ปิด — สาขาบันทึกไม่ได้'}</div>
-          <div style="height:6px;border-radius:3px;background:var(--surface3);margin-top:10px;overflow:hidden;max-width:240px">
+          <div style="font-size:13px;color:${selActive?'var(--green)':'var(--red)'};font-weight:700">${selActive?'✅ เปิดให้สาขาบันทึกอยู่':'🔒 ปิด — สาขาบันทึกไม่ได้'}</div>
+          <div style="height:6px;border-radius:3px;background:var(--surface3);margin-top:10px;overflow:hidden;max-width:280px">
             <div style="height:100%;border-radius:3px;background:var(--blue);width:${sentPct}%;transition:width .6s"></div>
           </div>
-          <div style="font-size:11px;color:var(--txt4);margin-top:3px">${sentPct}% ของสาขาบันทึกแล้ว</div>
+          <div style="font-size:11px;color:var(--txt4);margin-top:3px">${sentPct}% (${selStores} / ${totalStoresAll} สาขา)</div>
         </div>
-        <button class="btn" style="${curActive?'background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2)':'background:var(--green-bg);color:var(--green);border:1px solid rgba(13,159,110,.2)'};padding:11px 20px;font-weight:700;border-radius:var(--r8);cursor:pointer;font-size:13.5px" onclick="toggleMonth('${curYM}',${!curActive})">
-          ${curActive?'🔒 ปิดเดือนนี้':'✅ เปิดเดือนนี้'}
+        <button class="btn" style="${selActive?'background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2)':'background:var(--green-bg);color:var(--green);border:1px solid rgba(13,159,110,.2)'};padding:11px 20px;font-weight:700;border-radius:var(--r8);cursor:pointer;font-size:13.5px" onclick="toggleMonth('${selYM}',${!selActive})">
+          ${selActive?'🔒 ปิดเดือนนี้':'✅ เปิดเดือนนี้'}
         </button>
       </div>
-
-      ${(()=>{
-        /* แสดงเดือนย้อนหลังที่ Active อยู่ */
-        const pastActive = months.filter(ym=>ym<curYM && mc[ym]&&mc[ym].active===true).reverse();
-        if(!pastActive.length) return '';
-        return `<div style="margin-top:14px;padding:12px 14px;background:var(--warn-bg);border-radius:var(--r8);border:1px solid rgba(212,139,10,.25)">
-          <div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:8px">↩️ เดือนย้อนหลังที่เปิด Active อยู่ (${pastActive.length} เดือน)</div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">
-            ${pastActive.map(ym=>`
-              <div style="display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.6);border:1px solid rgba(212,139,10,.3);border-radius:var(--r8);padding:5px 10px">
-                <span style="font-size:12px;font-weight:700;color:var(--warn)">${ymToFull(ym)}</span>
-                <button onclick="toggleMonth('${ym}',false)" style="background:none;border:none;cursor:pointer;color:var(--txt4);font-size:12px;padding:0;line-height:1" title="ปิดเดือนนี้">✕</button>
-              </div>`).join('')}
-          </div>
-        </div>`;
-      })()}
+      ${pastActive.length ? `<div style="margin-top:12px;padding:10px 13px;background:var(--warn-bg);border-radius:var(--r8);border:1px solid rgba(212,139,10,.25)">
+        <div style="font-size:12px;font-weight:700;color:var(--warn);margin-bottom:6px">↩️ เดือนย้อนหลัง Active (${pastActive.length})</div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px">${pastActive.map(ym=>`<div style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.6);border:1px solid rgba(212,139,10,.3);border-radius:var(--r8);padding:3px 8px"><span style="font-size:11px;font-weight:700;color:var(--warn)">${ymToFull(ym)}</span><button onclick="toggleMonth('${ym}',false)" style="background:none;border:none;cursor:pointer;color:var(--txt4);font-size:11px;padding:0;line-height:1">✕</button></div>`).join('')}</div>
+      </div>` : ''}
     </div>
 
-    <!-- สาขาที่ยังไม่บันทึก -->
-    ${notSentStores.length>0?`
     <div class="card">
-      <div class="card-head">
-        <div class="card-title" style="color:var(--red)">⏳ ยังไม่บันทึก <span class="sub">${notSentStores.length} สาขา</span></div>
+      <div class="card-head" style="flex-wrap:wrap;gap:8px">
+        <div>
+          <div class="card-title">📋 สถานะการบันทึกข้อมูลรายสาขา — ${ymToFull(selYM)}</div>
+          <div style="font-size:12px;color:var(--txt3);margin-top:2px">แบ่งสาขาตามสถานะ เพื่อให้ติดตามสาขาที่ยังไม่บันทึกได้ง่ายขึ้น</div>
+        </div>
+        <button onclick="exportStoreStatusExcel('${selYM}')" style="background:var(--amber);color:#fff;border:none;font-weight:700;padding:9px 16px;border-radius:var(--r8);cursor:pointer;font-size:13px">🧾 Export Excel</button>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${notSentStores.slice(0,40).map(s=>`<span style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.15);border-radius:var(--r8);padding:4px 11px;font-size:12px;font-weight:600">${s.n} ${esc(s.name)}</span>`).join('')}
-        ${notSentStores.length>40?`<span style="color:var(--txt3);font-size:12px;padding:4px">...และอีก ${notSentStores.length-40} สาขา</span>`:''}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border2);border-radius:var(--r12);overflow:hidden">
+        <div style="border-right:1px solid var(--border2)">
+          <div style="padding:11px 15px;background:var(--red-bg);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:7px"><div style="width:8px;height:8px;border-radius:50%;background:var(--red)"></div><span style="font-size:13px;font-weight:700;color:var(--red)">ยังไม่บันทึกข้อมูล</span></div>
+            <span style="font-size:12px;font-weight:800;background:var(--red);color:#fff;border-radius:999px;padding:2px 10px">${notSentList.length} สาขา</span>
+          </div>
+          <div style="max-height:52vh;overflow-y:auto">
+            ${notSentList.length===0
+              ? '<div style="padding:24px;text-align:center;color:var(--green);font-weight:700;font-size:13px">✅ ทุกสาขาบันทึกแล้ว!</div>'
+              : notSentList.map((s,i)=>`<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border2);${i%2===0?'background:var(--surface1)':''}" ><span style="font-size:11px;color:var(--txt4);font-weight:700;min-width:22px">${i+1}</span><span style="font-size:12.5px;color:var(--txt);font-weight:500">บมจ.ซีพี แอ็กซ์ตร้า สาขา${esc(s.name)} ${s.n}</span></div>`).join('')}
+          </div>
+        </div>
+        <div>
+          <div style="padding:11px 15px;background:var(--green-bg);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:7px"><div style="width:8px;height:8px;border-radius:50%;background:var(--green)"></div><span style="font-size:13px;font-weight:700;color:var(--green)">บันทึกข้อมูลแล้ว</span></div>
+            <span style="font-size:12px;font-weight:800;background:var(--green);color:#fff;border-radius:999px;padding:2px 10px">${sentList.length} สาขา</span>
+          </div>
+          <div style="max-height:52vh;overflow-y:auto">
+            ${sentList.length===0
+              ? '<div style="padding:24px;text-align:center;color:var(--txt3);font-size:13px">ยังไม่มีสาขาที่บันทึก</div>'
+              : sentList.map((s,i)=>{ const ts=lastSaveMap[String(s.n)]; return `<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border2);${i%2===0?'background:var(--surface1)':''}" ><span style="font-size:11px;color:var(--txt4);font-weight:700;min-width:22px">${s.n}</span><span style="font-size:12.5px;color:var(--txt);font-weight:500;flex:1">บมจ.ซีพี แอ็กซ์ตร้า สาขา${esc(s.name)} ${s.n}</span><span style="font-size:11px;color:var(--txt4);white-space:nowrap">${ts?formatThaiDT(ts):''}</span></div>`; }).join('')}
+          </div>
+        </div>
       </div>
-    </div>`:'<div class="card tc" style="padding:20px;color:var(--green)"><b>✅ ทุกสาขาบันทึกข้อมูลแล้วเดือนนี้!</b></div>'}`;
+    </div>`;
+}
+
+async function onDashYMChange(ym){
+  DASH_YM = ym;
+  const C = document.getElementById('content');
+  C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
+  const mc = await getMonthControl();
+  await renderAdminDashboardForYM(C, mc, ym);
+}
+
+function formatThaiDT(ts){
+  if(!ts) return '';
+  const d=new Date(ts), pad=n=>String(n).padStart(2,'0');
+  return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function exportStoreStatusExcel(selYM){
+  toast('กำลังสร้างไฟล์ Excel...','');
+  const allE = await dbGet('entries') || {};
+  const logs  = await dbGet('logs') || {};
+  const lastSaveMap = {};
+  Object.values(logs).forEach(l=>{ if(l&&l.no&&l.ym===selYM){ if(!lastSaveMap[l.no]||l.ts>lastSaveMap[l.no]) lastSaveMap[l.no]=l.ts; } });
+  const sentNos = new Set();
+  Object.keys(allE).forEach(sNo=>{ const mData=(allE[sNo]||{})[selYM]||{}; if(Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length>0) sentNos.add(String(sNo)); });
+  const wb = XLSX.utils.book_new();
+  const notR=[['ลำดับ','เลขสาขา','ชื่อสาขา','Username','สถานะ']];
+  STORES.filter(s=>!sentNos.has(String(s.n))).forEach((s,i)=>notR.push([i+1,s.n,s.name,s.u,'ยังไม่บันทึก']));
+  const ws1=XLSX.utils.aoa_to_sheet(notR); ws1['!cols']=[{wch:6},{wch:10},{wch:32},{wch:14},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws1,'ยังไม่บันทึก');
+  const sentR=[['ลำดับ','เลขสาขา','ชื่อสาขา','Username','บันทึกล่าสุด','สถานะ']];
+  STORES.filter(s=>sentNos.has(String(s.n))).forEach((s,i)=>sentR.push([i+1,s.n,s.name,s.u,lastSaveMap[String(s.n)]?formatThaiDT(lastSaveMap[String(s.n)]):'—','บันทึกแล้ว']));
+  const ws2=XLSX.utils.aoa_to_sheet(sentR); ws2['!cols']=[{wch:6},{wch:10},{wch:32},{wch:14},{wch:20},{wch:12}];
+  XLSX.utils.book_append_sheet(wb,ws2,'บันทึกแล้ว');
+  const allR=[['ลำดับ','เลขสาขา','ชื่อสาขา','Username','สถานะ','บันทึกล่าสุด']];
+  STORES.forEach((s,i)=>{ const sent=sentNos.has(String(s.n)); allR.push([i+1,s.n,s.name,s.u,sent?'บันทึกแล้ว':'ยังไม่บันทึก',sent&&lastSaveMap[String(s.n)]?formatThaiDT(lastSaveMap[String(s.n)]):'—']); });
+  const ws3=XLSX.utils.aoa_to_sheet(allR); ws3['!cols']=[{wch:6},{wch:10},{wch:32},{wch:14},{wch:14},{wch:20}];
+  XLSX.utils.book_append_sheet(wb,ws3,'ทั้งหมด');
+  XLSX.writeFile(wb,`StoreStatus_${selYM}_Bakery.xlsx`);
+  toast('Export สำเร็จ ✅','ok');
 }
 
 /* ════════════════════════════════════════════
@@ -1710,4 +1844,282 @@ async function saveMasterStores(newStores, successMsg) {
   } catch (e) {
     toast('เกิดข้อผิดพลาด: ' + e.message, 'err');
   }
+}
+
+/* ════════════════════════════════════════════
+   [NEW] STORE STATUS PAGE — สถานะการบันทึกรายสาขา
+   Admin เลือกเดือน + เห็น 2 col (ยังไม่บันทึก / บันทึกแล้ว) + Export
+════════════════════════════════════════════ */
+let STATUS_YM = currentYM();
+
+async function renderStoreStatus(){
+  setTB('สถานะการบันทึก','Admin — Store Status');
+  const C = document.getElementById('content');
+  C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
+  if(!STATUS_YM) STATUS_YM = currentYM();
+  const mc = await getMonthControl();
+  await renderStoreStatusForYM(C, mc, STATUS_YM);
+}
+
+async function renderStoreStatusForYM(C, mc, selYM){
+  const curYM = currentYM();
+  const allE = await dbGet('entries') || {};
+  const months = generateMonthList();
+
+  const sentStoreNos = new Set();
+  Object.keys(allE).forEach(sNo=>{
+    const mData=(allE[sNo]||{})[selYM]||{};
+    if(Object.keys(mData).filter(k=>mData[k]!==null&&mData[k]!=='').length>0) sentStoreNos.add(String(sNo));
+  });
+  const sentList    = STORES.filter(s=>sentStoreNos.has(String(s.n)));
+  const notSentList = STORES.filter(s=>!sentStoreNos.has(String(s.n)));
+
+  const logs = await dbGet('logs') || {};
+  const lastSaveMap = {};
+  Object.values(logs).forEach(l=>{ if(l&&l.no&&l.ym===selYM){ if(!lastSaveMap[l.no]||l.ts>lastSaveMap[l.no]) lastSaveMap[l.no]=l.ts; } });
+
+  const pastMonths   = months.filter(ym=>ym < curYM).reverse();
+  const futureMonths = months.filter(ym=>ym > curYM);
+  const makeOpt = ym => {
+    const isAct = mc[ym]&&mc[ym].active===true;
+    return `<option value="${ym}" ${selYM===ym?'selected':''}>${isAct?'✅':'🔒'} ${ym} — ${ymToFull(ym)}</option>`;
+  };
+  const ymOpts = `
+    <optgroup label="📅 เดือนปัจจุบัน">${makeOpt(curYM)}</optgroup>
+    <optgroup label="↩️ ย้อนหลัง (${pastMonths.length})">${pastMonths.map(makeOpt).join('')}</optgroup>
+    <optgroup label="🔮 อนาคต (${futureMonths.length})">${futureMonths.map(makeOpt).join('')}</optgroup>`;
+
+  const sentPct = STORES.length>0 ? Math.round(sentList.length/STORES.length*100) : 0;
+
+  C.innerHTML=`
+    <div class="card" style="margin-bottom:14px;border-left:4px solid var(--blue)">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <div style="font-size:36px">📋</div>
+        <div style="flex:1">
+          <div style="font-size:15px;font-weight:800;color:var(--txt)">สถานะการบันทึกข้อมูลรายสาขา — ${ymToFull(selYM)}</div>
+          <div style="font-size:13px;color:var(--txt3);margin-top:4px">แบ่งสาขาตามสถานะ เพื่อให้ติดตามสาขาที่ยังไม่บันทึกได้ง่ายขึ้น</div>
+          <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select class="ctrl" id="statusYMSel" style="font-size:12.5px" onchange="onStatusYMChange(this.value)">${ymOpts}</select>
+            <span style="font-size:12px;background:var(--red-bg);color:var(--red);border-radius:999px;padding:3px 10px;font-weight:700">● ยังไม่บันทึก ${notSentList.length}</span>
+            <span style="font-size:12px;background:var(--green-bg);color:var(--green);border-radius:999px;padding:3px 10px;font-weight:700">● บันทึกแล้ว ${sentList.length}</span>
+          </div>
+        </div>
+        <button onclick="exportStoreStatusExcel('${selYM}')" style="background:var(--amber);color:#fff;border:none;font-weight:700;padding:9px 18px;border-radius:var(--r8);cursor:pointer;font-size:13px;white-space:nowrap">🧾 Export Excel</button>
+      </div>
+    </div>
+
+    <div style="margin-bottom:10px">
+      <div style="height:10px;border-radius:999px;background:var(--surface3);overflow:hidden">
+        <div style="height:100%;border-radius:999px;background:var(--green);width:${sentPct}%;transition:width .8s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--txt3)">
+        <span>${sentPct}% บันทึกแล้ว</span>
+        <span>${sentList.length} / ${STORES.length} สาขา</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <!-- ยังไม่บันทึก -->
+      <div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 16px;background:var(--red-bg);display:flex;align-items:center;justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:9px;height:9px;border-radius:50%;background:var(--red)"></div>
+            <span style="font-size:13.5px;font-weight:700;color:var(--red)">ยังไม่บันทึกข้อมูล</span>
+          </div>
+          <span style="font-size:12px;font-weight:800;background:var(--red);color:#fff;border-radius:999px;padding:2px 12px">${notSentList.length} สาขา</span>
+        </div>
+        <div style="max-height:68vh;overflow-y:auto">
+          ${notSentList.length===0
+            ? '<div style="padding:32px;text-align:center;color:var(--green);font-weight:700;font-size:14px">✅ ทุกสาขาบันทึกแล้ว!</div>'
+            : notSentList.map((s,i)=>`
+              <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border2);${i%2===0?'background:var(--surface1)':''}">
+                <span style="font-size:11.5px;color:var(--txt4);font-weight:700;min-width:22px;text-align:right">${i+1}</span>
+                <span style="font-size:12.5px;color:var(--txt);font-weight:500">บมจ.ซีพี แอ็กซ์ตร้า สาขา${esc(s.name)} ${s.n}</span>
+              </div>`).join('')}
+        </div>
+      </div>
+
+      <!-- บันทึกแล้ว -->
+      <div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 16px;background:var(--green-bg);display:flex;align-items:center;justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:9px;height:9px;border-radius:50%;background:var(--green)"></div>
+            <span style="font-size:13.5px;font-weight:700;color:var(--green)">บันทึกข้อมูลแล้ว</span>
+          </div>
+          <span style="font-size:12px;font-weight:800;background:var(--green);color:#fff;border-radius:999px;padding:2px 12px">${sentList.length} สาขา</span>
+        </div>
+        <div style="max-height:68vh;overflow-y:auto">
+          ${sentList.length===0
+            ? '<div style="padding:32px;text-align:center;color:var(--txt3);font-size:13px">ยังไม่มีสาขาที่บันทึก</div>'
+            : sentList.map((s,i)=>{
+                const ts = lastSaveMap[String(s.n)];
+                return `<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border2);${i%2===0?'background:var(--surface1)':''}">
+                  <span style="font-size:11.5px;color:var(--txt4);font-weight:700;min-width:22px;text-align:right">${s.n}</span>
+                  <span style="font-size:12.5px;color:var(--txt);font-weight:500;flex:1">บมจ.ซีพี แอ็กซ์ตร้า สาขา${esc(s.name)} ${s.n}</span>
+                  <span style="font-size:11px;color:var(--txt4);white-space:nowrap">${ts?formatThaiDT(ts):''}</span>
+                </div>`;
+              }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+
+async function onStatusYMChange(ym){
+  STATUS_YM = ym;
+  const C = document.getElementById('content');
+  C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
+  const mc = await getMonthControl();
+  await renderStoreStatusForYM(C, mc, ym);
+}
+
+/* ════════════════════════════════════════════
+   [NEW] PRESENCE PAGE — สาขาออนไลน์ (Realtime)
+   Firebase path: presence/{storeNo}
+   { no, name, loginAt, lastSeen, ua, online }
+════════════════════════════════════════════ */
+let _presenceListener = null;
+
+async function renderPresence(){
+  setTB('สาขาออนไลน์','Admin — Realtime Presence');
+  const C = document.getElementById('content');
+  C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
+
+  // ยกเลิก listener เก่าถ้ามี
+  if(_presenceListener){ db.ref('presence').off('value', _presenceListener); _presenceListener=null; }
+
+  buildPresenceView(C, {});
+
+  // ผูก realtime listener
+  _presenceListener = db.ref('presence').on('value', snap=>{
+    const data = snap.val() || {};
+    if(CURVIEW === 'presence') buildPresenceView(C, data);
+    else { db.ref('presence').off('value', _presenceListener); _presenceListener=null; }
+  });
+}
+
+function buildPresenceView(C, presenceData){
+  const now = Date.now();
+  const TIMEOUT_MS = 2 * 60 * 1000; // 2 นาที = อาจไม่ตอบสนอง
+
+  const allPresence = Object.values(presenceData).map(p=>{
+    if(!p || !p.no) return null;
+    const store = STORES.find(s=>String(s.n)===String(p.no));
+    const elapsed = now - (p.lastSeen||0);
+    let status = 'offline';
+    if(p.online && elapsed < TIMEOUT_MS)        status = 'online';
+    else if(p.online && elapsed >= TIMEOUT_MS)  status = 'stale'; // heartbeat หายไป
+    return { ...p, storeName: store ? store.name : p.name, elapsed, status };
+  }).filter(Boolean).sort((a,b)=>{
+    const ord = {online:0, stale:1, offline:2};
+    return (ord[a.status]||2) - (ord[b.status]||2) || (b.lastSeen||0) - (a.lastSeen||0);
+  });
+
+  const onlineList = allPresence.filter(p=>p.status==='online');
+  const staleList  = allPresence.filter(p=>p.status==='stale');
+  const offlineList= allPresence.filter(p=>p.status==='offline');
+
+  function elapsedStr(ms){
+    if(ms < 60000) return `${Math.round(ms/1000)} วินาทีที่แล้ว`;
+    if(ms < 3600000) return `${Math.round(ms/60000)} นาทีที่แล้ว`;
+    return `${Math.round(ms/3600000)} ชั่วโมงที่แล้ว`;
+  }
+
+  function uaShort(ua=''){
+    if(!ua) return '—';
+    if(ua.includes('Edg')) return 'Edge';
+    if(ua.includes('Chrome')) return 'Chrome';
+    if(ua.includes('Firefox')) return 'Firefox';
+    if(ua.includes('Safari')) return 'Safari';
+    return 'Browser';
+  }
+
+  function statusBadge(p){
+    if(p.status==='online') return '<span style="display:inline-flex;align-items:center;gap:4px;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse-dot 1.4s infinite"></span>Online</span>';
+    if(p.status==='stale')  return '<span style="display:inline-flex;align-items:center;gap:4px;background:var(--warn-bg);color:var(--warn);font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px">⏸ อาจไม่ตอบสนอง</span>';
+    return '<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);color:var(--txt4);font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px">● Offline</span>';
+  }
+
+  function presenceRow(p, i){
+    const loginStr = p.loginAt ? formatThaiDT(p.loginAt) : '—';
+    const lastStr  = p.lastSeen ? formatThaiDT(p.lastSeen) : '—';
+    const elapsed  = p.lastSeen ? elapsedStr(now - p.lastSeen) : '—';
+    return `<tr>
+      <td style="padding:10px 14px;font-weight:600;color:var(--txt2)">${p.no} — บมจ.ซีพี แอ็กซ์ตร้า สาขา${esc(p.storeName)} ${p.no}</td>
+      <td style="padding:10px 14px">${statusBadge(p)}</td>
+      <td style="padding:10px 14px;color:var(--txt3);font-size:12px">${loginStr}</td>
+      <td style="padding:10px 14px;color:var(--txt3);font-size:12px">${elapsed}</td>
+      <td style="padding:10px 14px;color:var(--txt4);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(uaShort(p.ua))} · ${esc((p.ua||'').substring(0,40))}${(p.ua||'').length>40?'…':''}</td>
+      <td style="padding:10px 14px;text-align:right">
+        ${p.status!=='offline'?`<button onclick="forceLogoutPresence('${p.no}')" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);padding:4px 10px;border-radius:var(--r8);font-size:11.5px;font-weight:600;cursor:pointer">บังคับออกจากระบบ</button>`:''}
+      </td>
+    </tr>`;
+  }
+
+  const tableRows = allPresence.length === 0
+    ? '<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--txt3)">ยังไม่มีสาขาที่เข้าระบบ</td></tr>'
+    : allPresence.map((p,i)=>presenceRow(p,i)).join('');
+
+  C.innerHTML=`
+    <style>
+      @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
+    </style>
+    <div class="card" style="margin-bottom:14px;border-left:4px solid var(--green)">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <div style="font-size:36px">🟢</div>
+        <div style="flex:1">
+          <div style="font-size:15px;font-weight:800;color:var(--txt)">สถานะการเข้าใช้งานระบบของสาขา</div>
+          <div style="font-size:13px;color:var(--txt3);margin-top:4px">แสดงผลแบบ Real-time — รายการนี้จะอัปเดตอัตโนมัติเมื่อมีสาขา เข้า/ออก ระบบ</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span style="font-size:12px;background:var(--green-bg);color:var(--green);border-radius:999px;padding:4px 12px;font-weight:700">🟢 ${onlineList.length} สาขาออนไลน์</span>
+          ${staleList.length?`<span style="font-size:12px;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:4px 12px;font-weight:700">⏸ ${staleList.length} อาจไม่ตอบสนอง</span>`:''}
+          <button class="btn btn-secondary btn-sm" onclick="renderPresence()">🔄</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="tbl-wrap">
+        <table class="dtbl">
+          <thead>
+            <tr>
+              <th>สาขา</th>
+              <th style="width:150px">สถานะ</th>
+              <th style="width:140px">เวลาเข้าระบบ</th>
+              <th style="width:130px">เห็นล่าสุด</th>
+              <th style="width:200px">อุปกรณ์ / เบราว์เซอร์</th>
+              <th style="width:130px;text-align:right">การจัดการ</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="margin-top:10px;padding:10px 14px;background:var(--surface2);border-radius:var(--r8);font-size:12px;color:var(--txt3)">
+      💡 <b>หมายเหตุ:</b> สถานะ "อาจไม่ตอบสนอง" หมายถึงสาขาไม่ได้ส่ง heartbeat ภายใน 2 นาที (อาจปิดหน้าจอหรือเน็ตหลุด)
+      &nbsp;·&nbsp; Realtime listener ทำงานอยู่ — หน้านี้อัปเดตอัตโนมัติเมื่อมีการเปลี่ยนแปลง
+    </div>`;
+}
+
+async function forceLogoutPresence(storeNo){
+  showModal(`
+    <h3 style="color:var(--red)">⚠️ บังคับออกจากระบบ</h3>
+    <p style="color:var(--txt2);margin-top:10px">
+      ต้องการบังคับ <b>สาขา ${storeNo}</b> ออกจากระบบใช่หรือไม่?<br>
+      <span style="font-size:12px;color:var(--txt3)">สาขาจะถูก set offline ทันที แต่ยังสามารถ Login ได้ใหม่</span>
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn btn-danger" onclick="doForceLogoutPresence('${storeNo}')">⚠️ บังคับออก</button>
+    </div>`);
+}
+
+async function doForceLogoutPresence(storeNo){
+  closeModal();
+  try{
+    await dbSet(`presence/${storeNo}/online`, false);
+    await dbSet(`presence/${storeNo}/lastSeen`, Date.now());
+    toast(`บังคับสาขา ${storeNo} ออกจากระบบแล้ว`,'ok');
+  }catch(e){ toast('เกิดข้อผิดพลาด: '+e.message,'err'); }
 }
