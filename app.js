@@ -165,19 +165,24 @@ async function setMonthActive(ym, active){
   await dbSet(`monthControl/${ym}`, { active, updatedBy:'admin', updatedAt: Date.now() });
 }
 
-/* สร้างรายการเดือน ตั้งแต่เดือนปัจจุบัน → ธ.ค. 2030 (เรียงจากน้อยไปมาก) */
+/* สร้างรายการเดือนย้อนหลัง 24 เดือน → ธ.ค. 2030
+   ครอบคลุมทั้งอดีต (ย้อนหลัง) + ปัจจุบัน + อนาคต
+   → ทำให้ Admin เปิด Active เดือนย้อนหลังได้
+   → ทำให้ Store เห็นและบันทึกเดือนย้อนหลังที่ Admin เปิดไว้ได้ */
 function generateMonthList(){
   const list=[];
   const now=new Date();
-  const startY=now.getFullYear(), startM=now.getMonth(); // 0-indexed
+  /* เริ่มจาก 24 เดือนก่อนเดือนปัจจุบัน (ปรับค่าได้ที่ PAST_MONTHS) */
+  const PAST_MONTHS = 24;
+  const startDate = new Date(now.getFullYear(), now.getMonth() - PAST_MONTHS, 1);
   const endY=2030, endM=11; // ธ.ค. 2030
-  let y=startY, m=startM;
+  let y=startDate.getFullYear(), m=startDate.getMonth(); // 0-indexed
   while(y<endY||(y===endY&&m<=endM)){
     list.push(`${y}-${p2(m+1)}`);
     m++;
     if(m>11){m=0;y++;}
   }
-  return list; // ascending: ปัจจุบัน → ธ.ค. 2030
+  return list; // ascending: 24 เดือนก่อน → ธ.ค. 2030
 }
 
 /* ════════════════════════════════════════════
@@ -271,11 +276,29 @@ async function renderStoreDashboard(C){
     </button>
     <button class="btn btn-secondary" onclick="exportStoreTemplate()" style="margin-top:10px">
       📋 Export Template รายการสินค้า (สำหรับตรวจสอบล่วงหน้า)
-    </button>`;
+    </button>
+    ${(()=>{
+      /* แจ้งเตือนถ้ามีเดือนย้อนหลังที่ Admin เปิด Active ไว้ */
+      const pastActive = Object.keys(mc).filter(k=>/^\d{4}-\d{2}$/.test(k) && k < curYM && mc[k] && mc[k].active === true);
+      if(!pastActive.length) return '';
+      return `<div style="margin-top:12px;padding:12px 16px;background:var(--warn-bg);border:1px solid rgba(212,139,10,.25);border-radius:var(--r12);display:flex;align-items:center;gap:10px">
+        <span style="font-size:20px">↩️</span>
+        <div>
+          <div style="font-size:13px;font-weight:700;color:var(--warn)">มีเดือนย้อนหลังที่เปิดรับบันทึก (${pastActive.length} เดือน)</div>
+          <div style="font-size:12px;color:var(--txt3);margin-top:2px">
+            ${pastActive.sort().reverse().map(m=>ymToFull(m)).join(', ')} — ไปที่ <b>บันทึกการตรวจนับ</b> เพื่อเลือกเดือน
+          </div>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="go('entry')" style="margin-left:auto;white-space:nowrap">📝 บันทึกย้อนหลัง</button>
+      </div>`;
+    })()}`;
 }
 
 /* ════════════════════════════════════════════
-   MONTH CONTROL (Admin)
+   MONTH CONTROL (Admin) — v5.3
+   รองรับเปิด/ปิดเดือนย้อนหลัง + อนาคต
+   Dropdown แบ่ง optgroup: ย้อนหลัง / ปัจจุบัน / อนาคต
+   default select = เดือนปัจจุบัน
 ════════════════════════════════════════════ */
 async function renderMonthControl(){
   setTB('จัดการเดือน','Month Control — Admin');
@@ -283,99 +306,216 @@ async function renderMonthControl(){
   C.innerHTML='<div class="card tc" style="padding:40px;color:var(--txt3)">⏳ กำลังโหลด...</div>';
   const mc = await getMonthControl();
   const curYM = currentYM();
-  const months = generateMonthList(); // ปัจจุบัน → ธ.ค. 2030
+  const months = generateMonthList(); // ย้อนหลัง 24 เดือน → ธ.ค. 2030
 
-  // นับ Active ทั้งหมด
   const activeCount = months.filter(ym=>mc[ym]&&mc[ym].active===true).length;
+  const pastMonths    = months.filter(ym=>ym <  curYM).reverse(); // ย้อนหลัง เรียงใหม่ล่าสุดก่อน
+  const futureMonths  = months.filter(ym=>ym >  curYM);           // อนาคต
 
-  // Dropdown options
-  const ymOpts = months.map(ym=>{
-    const isActive = mc[ym]&&mc[ym].active===true;
-    const isCur = ym===curYM;
-    return `<option value="${ym}">${ym} — ${ymToFull(ym)}${isCur?' ⭐':''} ${isActive?'✅':'🔒'}</option>`;
-  }).join('');
+  /* Dropdown แบ่ง 3 กลุ่ม เพื่อให้หาเดือนได้ง่าย */
+  const makeOpt = ym => {
+    const isAct = mc[ym]&&mc[ym].active===true;
+    const icon  = isAct ? '✅' : '🔒';
+    return `<option value="${ym}">${icon} ${ym} — ${ymToFull(ym)}</option>`;
+  };
+  const ymOpts = `
+    <optgroup label="📅 เดือนปัจจุบัน">
+      ${makeOpt(curYM)}
+    </optgroup>
+    <optgroup label="↩️ ย้อนหลัง (${pastMonths.length} เดือน)">
+      ${pastMonths.map(makeOpt).join('')}
+    </optgroup>
+    <optgroup label="🔮 อนาคต (${futureMonths.length} เดือน)">
+      ${futureMonths.map(makeOpt).join('')}
+    </optgroup>`;
 
   C.innerHTML=`
+    <!-- Header card -->
     <div class="card" style="margin-bottom:14px;border-left:4px solid var(--blue)">
       <div style="display:flex;align-items:center;gap:14px">
         <div style="font-size:36px">📅</div>
-        <div>
+        <div style="flex:1">
           <div style="font-size:15px;font-weight:800;color:var(--txt)">Month Control — จัดการเดือนที่เปิดรับบันทึก</div>
           <div style="font-size:13px;color:var(--txt3);margin-top:4px">
-            กำหนดว่าเดือนไหน <b style="color:var(--green)">Active</b> (User สาขาบันทึกได้) หรือ <b style="color:var(--red)">Inactive</b> (ดูได้แต่บันทึกไม่ได้)
+            กำหนดว่าเดือนไหน <b style="color:var(--green)">Active</b> (สาขาบันทึกได้) หรือ <b style="color:var(--red)">Inactive</b> (ดูได้อย่างเดียว)
+            — <b>รองรับเดือนย้อนหลัง 24 เดือน</b>
           </div>
-          <div style="font-size:12px;color:var(--txt4);margin-top:4px">เปิดอยู่ปัจจุบัน ${activeCount} เดือน · ช่วง ${ymToThai(curYM)} — ธ.ค. ${2030+543}</div>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <span style="font-size:12px;background:var(--green-bg);color:var(--green);border-radius:999px;padding:3px 10px;font-weight:700">✅ Active: ${activeCount} เดือน</span>
+            <span style="font-size:12px;background:var(--surface2);color:var(--txt3);border-radius:999px;padding:3px 10px">📅 ปัจจุบัน: ${ymToFull(curYM)}</span>
+            <span style="font-size:12px;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:3px 10px">↩️ ย้อนหลัง: ${pastMonths.length} เดือน</span>
+          </div>
         </div>
+        <button class="btn btn-secondary btn-sm" onclick="renderMonthControl()">🔄</button>
       </div>
     </div>
 
-    <div class="card">
+    <!-- Quick Action: เปิด/ปิดทีละเดือน -->
+    <div class="card" style="margin-bottom:14px">
       <div class="card-head">
-        <div class="card-title">🔧 เลือกเดือนที่ต้องการจัดการ</div>
-        <button class="btn btn-blue btn-sm" onclick="renderMonthControl()">🔄 รีเฟรช</button>
+        <div class="card-title">🔧 เปิด / ปิดเดือน</div>
       </div>
 
-      <!-- Dropdown เลือกเดือน -->
-      <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:20px">
-        <div style="flex:1;min-width:240px">
-          <label class="flabel">📅 เลือกเดือน (${ymToThai(curYM)} — ธ.ค. ${2030+543})</label>
-          <select class="ctrl w100" id="mcYMSel" style="font-size:13.5px">
+      <!-- Dropdown พร้อม optgroup -->
+      <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+        <div style="flex:1;min-width:260px">
+          <label class="flabel">📅 เลือกเดือนที่ต้องการจัดการ</label>
+          <select class="ctrl w100" id="mcYMSel" style="font-size:13px">
             ${ymOpts}
           </select>
         </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-blue" onclick="mcToggleSelected(true)">✅ เปิด Active</button>
-          <button class="btn btn-sm" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);padding:9px 16px;border-radius:var(--r8);font-weight:600;cursor:pointer" onclick="mcToggleSelected(false)">🔒 ปิด Inactive</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-blue" id="mcOpenBtn" onclick="mcToggleSelected(true)">✅ เปิด Active</button>
+          <button class="btn btn-sm" id="mcCloseBtn" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);padding:9px 16px;border-radius:var(--r8);font-weight:600;cursor:pointer" onclick="mcToggleSelected(false)">🔒 ปิด Inactive</button>
         </div>
       </div>
 
-      <!-- สถานะเดือนที่เลือก (แสดงแบบ realtime) -->
-      <div id="mcStatusBox" style="padding:14px 18px;border-radius:var(--r12);background:var(--surface2);border:1px solid var(--border2)">
-        <div style="font-size:12px;color:var(--txt3)">← เลือกเดือนด้านบน แล้วกดเปิด หรือปิด</div>
+      <!-- Status box แสดงสถานะเดือนที่เลือก realtime -->
+      <div id="mcStatusBox" style="padding:14px 18px;border-radius:var(--r12);background:var(--surface2);border:1px solid var(--border2);min-height:60px">
+        <div style="font-size:12px;color:var(--txt3)">← เลือกเดือนด้านบน เพื่อดูสถานะและจัดการ</div>
       </div>
 
-      <div style="margin-top:14px;padding:12px 16px;background:var(--warn-bg);border-radius:var(--r12);border:1px solid rgba(212,139,10,.20);font-size:13px;color:var(--warn)">
-        ⚠️ <b>หมายเหตุ:</b> เมื่อปิดเดือน (Inactive) User สาขาจะยังดูข้อมูลและ Export ได้ตามปกติ แต่บันทึกหรือแก้ไขข้อมูลไม่ได้
+      <div style="margin-top:12px;padding:11px 15px;background:var(--warn-bg);border-radius:var(--r8);border:1px solid rgba(212,139,10,.20);font-size:12.5px;color:var(--warn)">
+        ⚠️ <b>หมายเหตุ:</b> เมื่อปิดเดือน (Inactive) สาขายังดูข้อมูล / Export ได้ แต่บันทึกหรือแก้ไขไม่ได้
+        <br>เมื่อเปิดเดือนย้อนหลัง (Active) สาขาจะเห็นเดือนนั้นใน dropdown บันทึกการตรวจนับและบันทึกย้อนหลังได้ทันที
+      </div>
+    </div>
+
+    <!-- Batch action: เปิดหลายเดือนพร้อมกัน -->
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-head">
+        <div class="card-title">⚡ เปิด/ปิดหลายเดือนพร้อมกัน</div>
+        <button class="btn btn-secondary btn-sm" onclick="toggleBatchPanel()">▼ แสดง</button>
+      </div>
+      <div id="batchPanel" style="display:none;margin-top:8px">
+        <div style="margin-bottom:10px;font-size:13px;color:var(--txt2)">เลือกเดือนที่ต้องการ แล้วกด <b>เปิดทั้งหมดที่เลือก</b> หรือ <b>ปิดทั้งหมดที่เลือก</b></div>
+        <div id="batchCheckboxes" style="display:flex;flex-wrap:wrap;gap:6px;max-height:220px;overflow-y:auto;padding:4px 0">
+          ${months.map(ym=>{
+            const isAct = mc[ym]&&mc[ym].active===true;
+            const isPast = ym < curYM;
+            const isCur  = ym === curYM;
+            const bg = isCur?'var(--blue-xl)':isPast?'var(--warn-bg)':'var(--surface2)';
+            const col = isCur?'var(--blue)':isPast?'var(--warn)':'var(--txt2)';
+            return `<label style="display:inline-flex;align-items:center;gap:6px;background:${bg};border:1px solid var(--border2);border-radius:var(--r8);padding:5px 10px;cursor:pointer;font-size:12px;color:${col};font-weight:600">
+              <input type="checkbox" data-ym="${ym}" style="accent-color:var(--blue)">
+              ${isAct?'✅':'🔒'} ${ymToFull(ym)}${isCur?' ⭐':''}${isPast?' ↩️':''}
+            </label>`;
+          }).join('')}
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn btn-blue btn-sm" onclick="batchSelectAll(true)">☑️ เลือกทั้งหมด</button>
+          <button class="btn btn-secondary btn-sm" onclick="batchSelectAll(false)">☐ ยกเลิกทั้งหมด</button>
+          <div style="flex:1"></div>
+          <button class="btn btn-blue" onclick="doBatchToggle(true)">✅ เปิดที่เลือกทั้งหมด</button>
+          <button class="btn btn-sm" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);padding:9px 16px;border-radius:var(--r8);font-weight:600;cursor:pointer" onclick="doBatchToggle(false)">🔒 ปิดที่เลือกทั้งหมด</button>
+        </div>
       </div>
     </div>
 
     <!-- รายการเดือนที่ Active ทั้งหมด -->
-    <div class="card" style="margin-top:14px">
+    <div class="card">
       <div class="card-head"><div class="card-title">✅ เดือนที่เปิด Active <span class="sub">${activeCount} เดือน</span></div></div>
       <div id="activeMonthList">
         ${buildActiveMonthList(months, mc)}
       </div>
     </div>`;
 
-  // ผูก event บน select เพื่อแสดงสถานะ realtime
-  document.getElementById('mcYMSel').addEventListener('change', function(){
-    const ym=this.value;
-    const isActive=mc[ym]&&mc[ym].active===true;
-    const isCur=ym===curYM;
+  /* ── ผูก event: select แสดงสถานะ realtime ── */
+  const selEl = document.getElementById('mcYMSel');
+  // set default = เดือนปัจจุบัน
+  selEl.value = curYM;
+
+  function updateStatusBox(){
+    const ym  = selEl.value;
+    const isAct = mc[ym]&&mc[ym].active===true;
+    const isPast = ym < curYM;
+    const isCur  = ym === curYM;
+    const isFut  = ym > curYM;
+    const typeLabel = isCur
+      ? '<span style="font-size:11px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:2px 8px;margin-left:6px">ปัจจุบัน</span>'
+      : isPast
+        ? '<span style="font-size:11px;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:2px 8px;margin-left:6px">↩️ ย้อนหลัง</span>'
+        : '<span style="font-size:11px;background:var(--surface3);color:var(--txt3);border-radius:999px;padding:2px 8px;margin-left:6px">🔮 อนาคต</span>';
     document.getElementById('mcStatusBox').innerHTML=`
-      <div style="display:flex;align-items:center;gap:12px">
-        <span style="font-size:28px">${isActive?'✅':'🔒'}</span>
-        <div>
-          <div style="font-weight:800;font-size:14px;color:var(--txt)">${ymToFull(ym)} ${isCur?'<span style="font-size:11px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:2px 8px;margin-left:4px">เดือนปัจจุบัน</span>':''}</div>
-          <div style="font-size:13px;color:${isActive?'var(--green)':'var(--red)'};font-weight:700;margin-top:2px">${isActive?'Active — เปิดให้บันทึก':'Inactive — ปิดการบันทึก'}</div>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <span style="font-size:32px">${isAct?'✅':'🔒'}</span>
+        <div style="flex:1">
+          <div style="font-weight:800;font-size:15px;color:var(--txt);display:flex;align-items:center;flex-wrap:wrap;gap:4px">
+            ${ymToFull(ym)} ${typeLabel}
+          </div>
+          <div style="font-size:13px;color:${isAct?'var(--green)':'var(--red)'};font-weight:700;margin-top:4px">
+            ${isAct?'Active — สาขาบันทึกได้ตอนนี้':'Inactive — สาขาบันทึกไม่ได้'}
+          </div>
+          <div style="font-size:12px;color:var(--txt3);margin-top:2px">${ym}</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          ${!isAct?`<button class="btn btn-blue btn-sm" onclick="mcToggleSelected(true)">✅ เปิด Active</button>`:''}
+          ${isAct ?`<button class="btn btn-sm" style="background:var(--red-bg);color:var(--red);border:1px solid rgba(224,50,68,.2);padding:7px 14px;border-radius:var(--r8);font-weight:600;cursor:pointer;font-size:12px" onclick="mcToggleSelected(false)">🔒 ปิด Inactive</button>`:''}
         </div>
       </div>`;
-  });
-  // trigger ครั้งแรก
-  document.getElementById('mcYMSel').dispatchEvent(new Event('change'));
+  }
+
+  selEl.addEventListener('change', updateStatusBox);
+  updateStatusBox(); // trigger ครั้งแรก
+}
+
+/* ── Batch panel toggle ── */
+function toggleBatchPanel(){
+  const p = document.getElementById('batchPanel');
+  const btn = p.previousElementSibling.querySelector('button');
+  if(p.style.display==='none'){ p.style.display='block'; if(btn) btn.textContent='▲ ซ่อน'; }
+  else { p.style.display='none'; if(btn) btn.textContent='▼ แสดง'; }
+}
+function batchSelectAll(checked){
+  document.querySelectorAll('#batchCheckboxes input[type=checkbox]')
+    .forEach(cb=>cb.checked=checked);
+}
+async function doBatchToggle(active){
+  const checked=[...document.querySelectorAll('#batchCheckboxes input[type=checkbox]:checked')]
+    .map(cb=>cb.dataset.ym);
+  if(!checked.length){ toast('ยังไม่ได้เลือกเดือน','err'); return; }
+  const label = active?'เปิด Active':'ปิด Inactive';
+  const icon  = active?'✅':'🔒';
+  showModal(`
+    <h3>${icon} ยืนยัน Batch ${label}</h3>
+    <p style="color:var(--txt2);margin-top:10px">
+      ต้องการ <b>${label}</b> จำนวน <b>${checked.length} เดือน</b> ใช่หรือไม่?<br>
+      <span style="font-size:12px;color:var(--txt3)">${checked.map(ym=>ymToFull(ym)).join(', ')}</span>
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+      <button class="btn ${active?'btn-blue':'btn-danger'}" onclick="doBatchConfirm(${JSON.stringify(checked)},${active})">${icon} ยืนยัน</button>
+    </div>`);
+}
+async function doBatchConfirm(yms, active){
+  closeModal();
+  let ok=0, fail=0;
+  for(const ym of yms){
+    try{ await setMonthActive(ym, active); ok++; }
+    catch(e){ fail++; }
+  }
+  toast(`${active?'✅ เปิด':'🔒 ปิด'} ${ok} เดือน สำเร็จ${fail?` (ล้มเหลว ${fail})`:''}`, ok>0?'ok':'err');
+  renderMonthControl();
 }
 
 function buildActiveMonthList(months, mc){
-  const actives=months.filter(ym=>mc[ym]&&mc[ym].active===true);
+  const actives=months.filter(ym=>mc[ym]&&mc[ym].active===true).slice().reverse(); // เรียงใหม่ล่าสุดก่อน
   if(!actives.length) return '<div style="padding:16px;text-align:center;color:var(--txt3);font-size:13px">ยังไม่มีเดือนที่เปิด Active</div>';
   const curYM=currentYM();
   return `<div style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0">
-    ${actives.map(ym=>`
-      <div style="display:inline-flex;align-items:center;gap:8px;background:var(--green-bg);border:1px solid rgba(13,159,110,.20);border-radius:var(--r8);padding:7px 13px">
-        <span style="font-size:12.5px;font-weight:700;color:var(--green)">${ymToFull(ym)}</span>
-        ${ym===curYM?'<span style="font-size:10px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:1px 7px">ปัจจุบัน</span>':''}
+    ${actives.map(ym=>{
+      const isPast = ym < curYM;
+      const isCur  = ym === curYM;
+      const isFut  = ym > curYM;
+      return `
+      <div style="display:inline-flex;align-items:center;gap:8px;background:${isPast?'var(--warn-bg)':'var(--green-bg)'};border:1px solid ${isPast?'rgba(212,139,10,.25)':'rgba(13,159,110,.20)'};border-radius:var(--r8);padding:7px 13px">
+        <span style="font-size:12.5px;font-weight:700;color:${isPast?'var(--warn)':'var(--green)'}">${ymToFull(ym)}</span>
+        ${isCur?'<span style="font-size:10px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:1px 7px">ปัจจุบัน</span>':''}
+        ${isPast?'<span style="font-size:10px;background:rgba(212,139,10,.15);color:var(--warn);border-radius:999px;padding:1px 7px">ย้อนหลัง</span>':''}
+        ${isFut?'<span style="font-size:10px;background:var(--surface3);color:var(--txt3);border-radius:999px;padding:1px 7px">อนาคต</span>':''}
         <button onclick="toggleMonth('${ym}',false)" style="background:none;border:none;cursor:pointer;color:var(--txt4);font-size:13px;padding:0;line-height:1" title="ปิดเดือนนี้">✕</button>
-      </div>`).join('')}
+      </div>`;
+    }).join('')}
   </div>`;
 }
 
@@ -388,14 +528,25 @@ async function mcToggleSelected(active){
 
 async function toggleMonth(ym, active){
   const label = active ? 'เปิด (Active)' : 'ปิด (Inactive)';
-  const icon = active ? '✅' : '🔒';
+  const icon  = active ? '✅' : '🔒';
+  const curYM = currentYM();
+  const isPast = ym < curYM;
+  const isCur  = ym === curYM;
+  const typeTag = isCur
+    ? '<span style="font-size:11px;background:var(--blue-xl);color:var(--blue);border-radius:999px;padding:2px 8px;margin-left:6px">เดือนปัจจุบัน</span>'
+    : isPast
+      ? '<span style="font-size:11px;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:2px 8px;margin-left:6px">↩️ ย้อนหลัง</span>'
+      : '<span style="font-size:11px;background:var(--surface3);color:var(--txt3);border-radius:999px;padding:2px 8px;margin-left:6px">🔮 อนาคต</span>';
   showModal(`
     <h3>${icon} ยืนยันการ${label}</h3>
-    <p style="color:var(--txt2);margin-top:10px">
-      ต้องการ <b>${label}</b> เดือน <b>${ymToFull(ym)}</b> ใช่หรือไม่?<br><br>
+    <p style="color:var(--txt2);margin-top:12px">
+      ต้องการ <b>${label}</b> เดือน<br>
+      <span style="font-size:16px;font-weight:800;color:var(--txt)">${ymToFull(ym)}</span> ${typeTag}
+    </p>
+    <p style="margin-top:10px;font-size:13px">
       ${active
-        ? '<span style="color:var(--green)">→ User สาขาทุกสาขา จะสามารถบันทึกข้อมูลเดือนนี้ได้</span>'
-        : '<span style="color:var(--red)">→ User สาขาทุกสาขา จะไม่สามารถบันทึกข้อมูลเดือนนี้ได้ (ดูข้อมูลได้ปกติ)</span>'
+        ? '<span style="color:var(--green)">→ สาขาทุกสาขา จะสามารถบันทึก / แก้ไขข้อมูลเดือนนี้ได้ทันที</span>'
+        : '<span style="color:var(--red)">→ สาขาทุกสาขา จะไม่สามารถบันทึก / แก้ไขข้อมูลเดือนนี้ได้ (ยังดูและ Export ได้ปกติ)</span>'
       }
     </p>
     <div class="modal-actions">
@@ -428,7 +579,7 @@ async function renderEntry(){
   // โหลดข้อมูลเดือน + ตรวจสอบสถานะ
   const mc = await getMonthControl();
 
-  // หาเดือนที่ Active ทั้งหมด
+  // หาเดือนที่ Active ทั้งหมด (ครอบคลุมย้อนหลัง 24 เดือนแล้ว)
   const activeMonths = generateMonthList().filter(ym => mc[ym] && mc[ym].active === true);
   // เดือนที่เคยมีข้อมูลแล้ว
   const allStoreData = await dbGet(`entries/${SES.no}`) || {};
@@ -440,25 +591,30 @@ async function renderEntry(){
   // ถ้าไม่มีเดือนไหนเลย
   if(!editableMonths.length){
     ENTRY_YM = currentYM();
-    const curActive = mc[currentYM()] && mc[currentYM()].active === true;
     C.innerHTML=`
       <div class="month-lock-banner">
         <div class="lock-icon">🔒</div>
         <div class="lock-text">
           <div class="lock-title">ยังไม่เปิดให้บันทึกข้อมูล</div>
-          <div class="lock-sub">ยังไม่มีเดือนไหนที่ Admin เปิด Active ไว้ กรุณารอ Admin เปิดเดือนที่ต้องการก่อน</div>
+          <div class="lock-sub">ยังไม่มีเดือนไหนที่ Admin เปิด Active ไว้ กรุณารอ Admin เปิดเดือนที่ต้องการก่อน (รองรับย้อนหลังได้)</div>
         </div>
       </div>
       <div class="card tc" style="padding:32px;color:var(--txt3)">
         <div style="font-size:48px;margin-bottom:12px">📅</div>
         <div style="font-size:15px;font-weight:700;color:var(--txt);margin-bottom:8px">ยังไม่มีเดือนที่เปิดให้บันทึก</div>
-        <div style="font-size:13px">กรุณาติดต่อ Admin เพื่อเปิด Active เดือนที่ต้องการบันทึกข้อมูล</div>
+        <div style="font-size:13px">กรุณาติดต่อ Admin เพื่อเปิด Active เดือนที่ต้องการ (สามารถเปิดย้อนหลังได้)</div>
       </div>`;
     return;
   }
 
-  // ใช้เดือนล่าสุดที่ active หรือเดือนที่ select อยู่ก่อนหน้า
-  if(!editableMonths.includes(ENTRY_YM)) ENTRY_YM = editableMonths[0];
+  /* เลือก default เดือนอัจฉริยะ:
+     1. ถ้าเดือนที่กำลัง select อยู่ยังอยู่ใน list → คงไว้
+     2. ถ้าเดือนปัจจุบันมีใน editableMonths → เลือกเดือนปัจจุบัน
+     3. ไม่งั้นเลือกเดือน Active ล่าสุด (index 0 หลัง sort().reverse()) */
+  if(!editableMonths.includes(ENTRY_YM)){
+    const curYM = currentYM();
+    ENTRY_YM = editableMonths.includes(curYM) ? curYM : editableMonths[0];
+  }
 
   await loadEntryForMonth(ENTRY_YM, editableMonths, mc, C);
 }
@@ -478,16 +634,26 @@ function buildEntryView(C, editableMonths, mc, isActive){
   const fView=items.filter(i=>ENTRY_DATA[i.code]!==null&&ENTRY_DATA[i.code]!==undefined&&ENTRY_DATA[i.code]!=='').length;
   const tQty=items.reduce((s,i)=>s+(parseFloat(ENTRY_DATA[i.code])||0),0);
   const clsOpts=ALL_CLS.map(c=>`<option value="${c}" ${CLS_FILTER===c?'selected':''}>${c==='ALL'?`ทั้งหมด (${ITEMS_DATA.length})`:`Class ${c} (${ITEMS_DATA.filter(i=>i.class===c).length})`}</option>`).join('');
+  const curYM = currentYM();
 
-  // Month selector options
-  const ymOpts = editableMonths.map(ym=>`<option value="${ym}" ${ENTRY_YM===ym?'selected':''}>${ymToFull(ym)}${mc[ym]&&mc[ym].active?'' :' 🔒'}</option>`).join('');
+  // Month selector options — แสดง label ย้อนหลัง / ปัจจุบัน / อนาคต
+  const ymOpts = editableMonths.map(ym=>{
+    const isPast = ym < curYM;
+    const isCur  = ym === curYM;
+    const isAct  = mc[ym] && mc[ym].active === true;
+    let label = ymToFull(ym);
+    if(isCur)  label += ' ⭐ (ปัจจุบัน)';
+    if(isPast) label += ' ↩️ (ย้อนหลัง)';
+    if(!isAct) label += ' 🔒';
+    return `<option value="${ym}" ${ENTRY_YM===ym?'selected':''}>${label}</option>`;
+  }).join('');
 
   const lockWarning = !isActive ? `
     <div style="background:var(--warn-bg);border:1px solid rgba(212,139,10,.25);border-radius:var(--r12);padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
       <span style="font-size:20px">⚠️</span>
       <div>
-        <div style="font-size:13px;font-weight:700;color:var(--warn)">เดือนนี้อยู่ในโหมดแก้ไขเท่านั้น (Inactive)</div>
-        <div style="font-size:12px;color:var(--txt3)">เดือน ${ymToFull(ENTRY_YM)} Admin ยังไม่ได้เปิด Active แต่คุณสามารถดูข้อมูลที่บันทึกไว้ได้</div>
+        <div style="font-size:13px;font-weight:700;color:var(--warn)">เดือนนี้อยู่ในโหมดดูอย่างเดียว (Inactive)</div>
+        <div style="font-size:12px;color:var(--txt3)">เดือน ${ymToFull(ENTRY_YM)} Admin ยังไม่ได้เปิด Active — ดูข้อมูลที่บันทึกไว้ได้ แต่ยังแก้ไขไม่ได้</div>
       </div>
     </div>` : '';
 
@@ -787,6 +953,22 @@ async function renderAdminDashboard(C){
           ${curActive?'🔒 ปิดเดือนนี้':'✅ เปิดเดือนนี้'}
         </button>
       </div>
+
+      ${(()=>{
+        /* แสดงเดือนย้อนหลังที่ Active อยู่ */
+        const pastActive = months.filter(ym=>ym<curYM && mc[ym]&&mc[ym].active===true).reverse();
+        if(!pastActive.length) return '';
+        return `<div style="margin-top:14px;padding:12px 14px;background:var(--warn-bg);border-radius:var(--r8);border:1px solid rgba(212,139,10,.25)">
+          <div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:8px">↩️ เดือนย้อนหลังที่เปิด Active อยู่ (${pastActive.length} เดือน)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${pastActive.map(ym=>`
+              <div style="display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.6);border:1px solid rgba(212,139,10,.3);border-radius:var(--r8);padding:5px 10px">
+                <span style="font-size:12px;font-weight:700;color:var(--warn)">${ymToFull(ym)}</span>
+                <button onclick="toggleMonth('${ym}',false)" style="background:none;border:none;cursor:pointer;color:var(--txt4);font-size:12px;padding:0;line-height:1" title="ปิดเดือนนี้">✕</button>
+              </div>`).join('')}
+          </div>
+        </div>`;
+      })()}
     </div>
 
     <!-- สาขาที่ยังไม่บันทึก -->
